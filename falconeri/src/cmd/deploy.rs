@@ -2,7 +2,7 @@
 
 use base64::{prelude::BASE64_STANDARD, Engine};
 use std::iter;
-use structopt::StructOpt;
+use clap::Args;
 
 use falconeri_common::{
     kubernetes,
@@ -59,53 +59,53 @@ struct DeployManifestParams {
 }
 
 /// Commands for interacting with the database.
-#[derive(Debug, StructOpt)]
-#[structopt(name = "deploy", about = "Commands for interacting with the database.")]
+#[derive(Debug, Args)]
+#[command(name = "deploy", about = "Commands for interacting with the database.")]
 pub struct Opt {
     /// Just print out the manifest without deploying it.
-    #[structopt(long = "dry-run")]
+    #[arg(long = "dry-run")]
     dry_run: bool,
 
     /// Don't include a secret in the manifest.
-    #[structopt(long = "skip-secret")]
+    #[arg(long = "skip-secret")]
     skip_secret: bool,
 
     /// Deploy a development server (for minikube).
-    #[structopt(long = "development")]
+    #[arg(long = "development")]
     development: bool,
 
     /// The version of PostgreSQL to deploy. It's generally OK to specify just
     /// the major version, like "14".
-    #[structopt(long = "postgres-version", default_value = "14")]
+    #[arg(long = "postgres-version", default_value = "14")]
     postgres_version: String,
 
     /// The amount of disk to allocate for PostgreSQL.
-    #[structopt(long = "postgres-storage")]
+    #[arg(long = "postgres-storage")]
     postgres_storage: Option<String>,
 
     /// The amount of RAM to request for PostgreSQL.
-    #[structopt(long = "postgres-memory")]
+    #[arg(long = "postgres-memory")]
     postgres_memory: Option<String>,
 
     /// The number of CPUs to request for PostgreSQL.
-    #[structopt(long = "postgres-cpu")]
+    #[arg(long = "postgres-cpu")]
     postgres_cpu: Option<String>,
 
     /// The number of copies of `falconerid` to run.
-    #[structopt(long = "falconerid-replicas")]
+    #[arg(long = "falconerid-replicas")]
     falconerid_replicas: Option<u16>,
 
     /// The amount of RAM to request for `falconerid`.
-    #[structopt(long = "falconerid-memory")]
+    #[arg(long = "falconerid-memory")]
     falconerid_memory: Option<String>,
 
     /// The number of CPUs to request for `falconerid`.
-    #[structopt(long = "falconerid-cpu")]
+    #[arg(long = "falconerid-cpu")]
     falconerid_cpu: Option<String>,
 
     /// Set the log level to be used for `falconerid`. This uses the same format
     /// as `RUST_LOG`. Example: `falconeri_common=debug,falconerid=debug,warn`.
-    #[structopt(long = "falconerid-log-level")]
+    #[arg(long = "falconerid-log-level")]
     falconerid_log_level: Option<String>,
 }
 

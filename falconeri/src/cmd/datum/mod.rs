@@ -1,18 +1,17 @@
 //! The `datum` subcommand.
 
 use falconeri_common::prelude::*;
-use structopt::StructOpt;
+use clap::Subcommand;
 
 mod describe;
 
 /// `datum` options.
-#[derive(Debug, StructOpt)]
+#[derive(Debug, Subcommand)]
 pub enum Opt {
     /// Describe a specific job.
-    #[structopt(name = "describe")]
+    #[command(name = "describe")]
     Describe {
         /// The UUID of the datum to describe.
-        #[structopt(parse(try_from_str))]
         id: Uuid,
     },
 }
