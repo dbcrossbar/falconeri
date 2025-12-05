@@ -1,11 +1,13 @@
 //! Database utilities.
 
 use anyhow::anyhow;
-use diesel::r2d2::ConnectionManager as DieselConnectionManager;
 use diesel::sql_query;
 use diesel::sql_types::BigInt;
+pub use diesel_async::pooled_connection::deadpool::Object as PooledConnection;
+pub use diesel_async::pooled_connection::deadpool::Pool as AsyncPoolInner;
+use diesel_async::pooled_connection::AsyncDieselConnectionManager;
+pub use diesel_async::AsyncPgConnection;
 use diesel_migrations::{HarnessWithOutput, MigrationHarness};
-use r2d2;
 use std::{env, fs::read_to_string, io};
 
 use crate::kubernetes::{base64_encoded_secret_string, kubectl_secret};
@@ -72,7 +74,7 @@ pub fn database_url(via: ConnectVia) -> Result<String> {
     }
 }
 
-/// Connect to PostgreSQL.
+/// Connect to PostgreSQL synchronously. Used for migrations at startup.
 #[tracing::instrument(level = "trace")]
 pub fn connect(via: ConnectVia) -> Result<PgConnection> {
     let database_url = database_url(via)?;
@@ -84,29 +86,29 @@ pub fn connect(via: ConnectVia) -> Result<PgConnection> {
     Ok(conn)
 }
 
-/// A database connection pool.
-pub type Pool = r2d2::Pool<DieselConnectionManager<PgConnection>>;
+/// An async database connection pool using deadpool.
+pub type AsyncPool = AsyncPoolInner<AsyncPgConnection>;
 
-/// A connection using our connection pool.
-pub type PooledConnection =
-    r2d2::PooledConnection<DieselConnectionManager<PgConnection>>;
+/// A pooled async database connection.
+pub type AsyncPooledConn = PooledConnection<AsyncPgConnection>;
 
-/// Create a connection pool using the specified parameters.
+/// Create an async connection pool using the specified parameters.
 #[tracing::instrument(level = "trace")]
-pub fn pool(pool_size: u32, via: ConnectVia) -> Result<Pool> {
+pub fn async_pool(pool_size: usize, via: ConnectVia) -> Result<AsyncPool> {
     let database_url = database_url(via)?;
-    let manager = DieselConnectionManager::new(database_url);
-    let pool = r2d2::Pool::builder()
+    let config = AsyncDieselConnectionManager::<AsyncPgConnection>::new(database_url);
+    AsyncPoolInner::builder(config)
         .max_size(pool_size)
-        .build(manager)
-        .context("could not create database pool")?;
-    Ok(pool)
+        .build()
+        .context("could not create async database pool")
 }
 
 /// The ID of the advisory lock that we use for migrations. Random.
 const MIGRATION_LOCK_ID: i64 = 5_275_218_930_720_578_783;
 
 /// Run any pending migrations, and print to standard output.
+/// This uses a synchronous connection since it runs at startup before
+/// the async runtime is fully initialized.
 #[tracing::instrument(skip(conn), level = "trace")]
 pub fn run_pending_migrations(conn: &mut PgConnection) -> Result<()> {
     debug!("Running pending migrations");

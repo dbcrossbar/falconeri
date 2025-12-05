@@ -1,3 +1,5 @@
+use diesel_async::RunQueryDsl;
+
 use crate::prelude::*;
 use crate::schema::*;
 
@@ -26,45 +28,58 @@ pub struct OutputFile {
 impl OutputFile {
     /// Find an output file by ID.
     #[tracing::instrument(skip(conn), level = "trace")]
-    pub fn find(id: Uuid, conn: &mut PgConnection) -> Result<OutputFile> {
+    pub async fn find(id: Uuid, conn: &mut AsyncPgConnection) -> Result<OutputFile> {
         output_files::table
             .find(id)
             .first(conn)
+            .await
             .with_context(|| format!("could not load output file {}", id))
     }
 
     /// Fetch all the input files corresponding to `datums`, returning grouped
     /// in the same order.
     #[tracing::instrument(skip(conn), level = "trace")]
-    pub fn delete_for_datum(datum: &Datum, conn: &mut PgConnection) -> Result<()> {
+    pub async fn delete_for_datum(
+        datum: &Datum,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<()> {
         diesel::delete(OutputFile::belonging_to(datum))
             .execute(conn)
+            .await
             .context("could not delete output files belonging to failed datums")?;
         Ok(())
     }
 
     /// Mark the specified output files as having been successfully processed.
     #[tracing::instrument(skip(conn), level = "trace")]
-    pub fn mark_ids_as_done(ids: &[Uuid], conn: &mut PgConnection) -> Result<()> {
+    pub async fn mark_ids_as_done(
+        ids: &[Uuid],
+        conn: &mut AsyncPgConnection,
+    ) -> Result<()> {
         diesel::update(output_files::table.filter(output_files::id.eq_any(ids)))
             .set((
                 output_files::updated_at.eq(Utc::now().naive_utc()),
                 output_files::status.eq(&Status::Done),
             ))
             .execute(conn)
+            .await
             .context("can't mark output file as done")?;
         Ok(())
     }
 
     /// Mark the specified output files as having been successfully processed.
     #[tracing::instrument(skip(conn), level = "trace")]
-    pub fn mark_ids_as_error(ids: &[Uuid], conn: &mut PgConnection) -> Result<()> {
+    pub async fn mark_ids_as_error(
+        ids: &[Uuid],
+        conn: &mut AsyncPgConnection,
+    ) -> Result<()> {
         diesel::update(output_files::table.filter(output_files::id.eq_any(ids)))
             .set((
                 output_files::updated_at.eq(Utc::now().naive_utc()),
                 output_files::status.eq(&Status::Error),
             ))
             .execute(conn)
+            .await
             .context("can't mark output file as done")?;
         Ok(())
     }
@@ -72,9 +87,9 @@ impl OutputFile {
     /// Mark the output files of this datum as having been successfully
     /// processed.
     #[tracing::instrument(skip(conn), level = "trace")]
-    pub fn mark_as_done_by_datum(
+    pub async fn mark_as_done_by_datum(
         datum: &Datum,
-        conn: &mut PgConnection,
+        conn: &mut AsyncPgConnection,
     ) -> Result<()> {
         diesel::update(OutputFile::belonging_to(datum))
             .set((
@@ -82,6 +97,7 @@ impl OutputFile {
                 output_files::status.eq(&Status::Done),
             ))
             .execute(conn)
+            .await
             .context("can't mark output file as done")?;
         Ok(())
     }
@@ -89,9 +105,9 @@ impl OutputFile {
     /// Mark the output files of this datum as having been unsuccessfully
     /// processed.
     #[tracing::instrument(skip(conn), level = "trace")]
-    pub fn mark_as_error_by_datum(
+    pub async fn mark_as_error_by_datum(
         datum: &Datum,
-        conn: &mut PgConnection,
+        conn: &mut AsyncPgConnection,
     ) -> Result<()> {
         diesel::update(OutputFile::belonging_to(datum))
             .set((
@@ -99,6 +115,7 @@ impl OutputFile {
                 output_files::status.eq(&Status::Error),
             ))
             .execute(conn)
+            .await
             .context("can't mark output file as error")?;
         Ok(())
     }
@@ -119,13 +136,14 @@ pub struct NewOutputFile {
 impl NewOutputFile {
     /// Insert new output files into the database.
     #[tracing::instrument(skip(conn), level = "trace")]
-    pub fn insert_all(
+    pub async fn insert_all(
         output_files: &[Self],
-        conn: &mut PgConnection,
+        conn: &mut AsyncPgConnection,
     ) -> Result<Vec<OutputFile>> {
         let output_files = diesel::insert_into(output_files::table)
             .values(output_files)
             .get_results::<OutputFile>(conn)
+            .await
             .context("error inserting datums")?;
         Ok(output_files)
     }

@@ -61,8 +61,9 @@ enum Opt {
 }
 
 /// Wrapper around `run` which reports errors.
-fn main() {
-    if let Err(err) = run() {
+#[tokio::main]
+async fn main() {
+    if let Err(err) = run().await {
         let stderr = stderr();
         write!(&mut stderr.lock(), "{}", err.display_causes_and_backtrace())
             .expect("Error occurred while trying to display error");
@@ -71,16 +72,16 @@ fn main() {
 }
 
 /// The actual main code of the application.
-fn run() -> Result<()> {
+async fn run() -> Result<()> {
     falconeri_common::init_openssl_probe();
     let opt = Opt::from_args();
     debug!("Args: {:?}", opt);
 
     match opt {
-        Opt::Datum { ref cmd } => cmd::datum::run(cmd),
+        Opt::Datum { ref cmd } => cmd::datum::run(cmd).await,
         Opt::Db { ref cmd } => cmd::db::run(cmd),
         Opt::Deploy { ref cmd } => cmd::deploy::run(cmd),
-        Opt::Job { ref cmd } => cmd::job::run(cmd),
+        Opt::Job { ref cmd } => cmd::job::run(cmd).await,
         Opt::Migrate => cmd::migrate::run(),
         Opt::Proxy => cmd::proxy::run(),
         Opt::Undeploy { all } => cmd::deploy::run_undeploy(all),

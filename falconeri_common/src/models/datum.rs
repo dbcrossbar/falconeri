@@ -1,3 +1,5 @@
+use diesel_async::RunQueryDsl;
+
 use crate::kubernetes;
 use crate::prelude::*;
 use crate::schema::*;
@@ -41,18 +43,19 @@ pub struct Datum {
 impl Datum {
     /// Find a datum by ID.
     #[tracing::instrument(skip(conn), level = "trace")]
-    pub fn find(id: Uuid, conn: &mut PgConnection) -> Result<Datum> {
+    pub async fn find(id: Uuid, conn: &mut AsyncPgConnection) -> Result<Datum> {
         datums::table
             .find(id)
             .first(conn)
+            .await
             .with_context(|| format!("could not load datum {}", id))
     }
 
     /// Find all datums with the specified status that belong to a running job.
     #[tracing::instrument(skip(conn), level = "trace")]
-    pub fn active_with_status(
+    pub async fn active_with_status(
         status: Status,
-        conn: &mut PgConnection,
+        conn: &mut AsyncPgConnection,
     ) -> Result<Vec<Datum>> {
         let datums = datums::table
             .inner_join(jobs::table)
@@ -60,6 +63,7 @@ impl Datum {
             .filter(datums::status.eq(status))
             .select(datums::all_columns)
             .load::<Datum>(conn)
+            .await
             .with_context(|| {
                 format!("could not load datums with status {}", status)
             })?;
@@ -69,8 +73,8 @@ impl Datum {
     /// Find datums which claim to be running, but whose `pod_name` points to a
     /// non-existant pod.
     #[tracing::instrument(skip(conn), level = "trace")]
-    pub fn zombies(conn: &mut PgConnection) -> Result<Vec<Datum>> {
-        let running = Self::active_with_status(Status::Running, conn)?;
+    pub async fn zombies(conn: &mut AsyncPgConnection) -> Result<Vec<Datum>> {
+        let running = Self::active_with_status(Status::Running, conn).await?;
         trace!("running datums: {:?}", running);
         let running_pod_names = kubernetes::get_running_pod_names()?;
         Ok(running
@@ -89,7 +93,7 @@ impl Datum {
     ///
     /// This will only return datums associated with running jobs.
     #[tracing::instrument(skip(conn), level = "trace")]
-    pub fn rerunable(conn: &mut PgConnection) -> Result<Vec<Datum>> {
+    pub async fn rerunable(conn: &mut AsyncPgConnection) -> Result<Vec<Datum>> {
         let datums = datums::table
             .inner_join(jobs::table)
             .filter(jobs::status.eq(Status::Running))
@@ -97,6 +101,7 @@ impl Datum {
             .filter(datums::attempted_run_count.lt(datums::maximum_allowed_run_count))
             .select(datums::all_columns)
             .load::<Datum>(conn)
+            .await
             .context("could not load rerunable datums")?;
         debug!("found {} re-runable jobs", datums.len());
         Ok(datums)
@@ -115,31 +120,39 @@ impl Datum {
 
     /// Get the input files for this datum.
     #[tracing::instrument(skip(conn), level = "trace")]
-    pub fn input_files(&self, conn: &mut PgConnection) -> Result<Vec<InputFile>> {
+    pub async fn input_files(
+        &self,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<Vec<InputFile>> {
         InputFile::belonging_to(self)
             .order_by(input_files::created_at)
             .load(conn)
+            .await
             .context("could not load input file")
     }
 
     /// Lock the underying database row using `SELECT FOR UPDATE`. Must be
     /// called from within a transaction.
     #[tracing::instrument(skip(conn), level = "trace")]
-    pub fn lock_for_update(&mut self, conn: &mut PgConnection) -> Result<()> {
+    pub async fn lock_for_update(
+        &mut self,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<()> {
         *self = datums::table
             .find(self.id)
             .for_update()
             .first(conn)
+            .await
             .with_context(|| format!("could not load datum {}", self.id))?;
         Ok(())
     }
 
     /// Mark this datum as having been successfully processed.
     #[tracing::instrument(skip(conn, output), level = "trace")]
-    pub fn mark_as_done(
+    pub async fn mark_as_done(
         &mut self,
         output: &str,
-        conn: &mut PgConnection,
+        conn: &mut AsyncPgConnection,
     ) -> Result<()> {
         let now = Utc::now().naive_utc();
         *self = diesel::update(datums::table.filter(datums::id.eq(&self.id)))
@@ -149,18 +162,19 @@ impl Datum {
                 datums::output.eq(output),
             ))
             .get_result(conn)
+            .await
             .context("can't mark datum as done")?;
         Ok(())
     }
 
     /// Mark this datum as having been unsuccessfully processed.
     #[tracing::instrument(skip(conn, output, backtrace), level = "trace")]
-    pub fn mark_as_error(
+    pub async fn mark_as_error(
         &mut self,
         output: &str,
         error_message: &str,
         backtrace: &str,
-        conn: &mut PgConnection,
+        conn: &mut AsyncPgConnection,
     ) -> Result<()> {
         let now = Utc::now().naive_utc();
         *self = diesel::update(datums::table.filter(datums::id.eq(&self.id)))
@@ -172,6 +186,7 @@ impl Datum {
                 datums::backtrace.eq(&backtrace),
             ))
             .get_result(conn)
+            .await
             .context("can't mark datum as having failed")?;
         Ok(())
     }
@@ -181,9 +196,9 @@ impl Datum {
     /// We assume that the datum's row is locked by `lock_for_update` when we
     /// are called.
     #[tracing::instrument(skip(conn), level = "trace")]
-    pub fn mark_as_eligible_for_rerun(
+    pub async fn mark_as_eligible_for_rerun(
         &mut self,
-        conn: &mut PgConnection,
+        conn: &mut AsyncPgConnection,
     ) -> Result<()> {
         let now = Utc::now().naive_utc();
         *self = diesel::update(datums::table.filter(datums::id.eq(&self.id)))
@@ -196,6 +211,7 @@ impl Datum {
                 // datums::attempted_run_count.eq(self.attempted_run_count + 1),
             ))
             .get_result(conn)
+            .await
             .context("can't mark datum as eligible")?;
         Ok(())
     }
@@ -203,9 +219,12 @@ impl Datum {
     /// Update the status of our associate job, if it has finished.
     ///
     /// This calls [`Job::update_status_if_done`].
-    pub fn update_job_status_if_done(&self, conn: &mut PgConnection) -> Result<()> {
-        let mut job = Job::find(self.job_id, conn)?;
-        job.update_status_if_done(conn)
+    pub async fn update_job_status_if_done(
+        &self,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<()> {
+        let mut job = Job::find(self.job_id, conn).await?;
+        job.update_status_if_done(conn).await
     }
 
     /// Generate a sample value for testing.
@@ -247,10 +266,14 @@ pub struct NewDatum {
 impl NewDatum {
     /// Insert new datums into the database.
     #[tracing::instrument(skip(conn), level = "trace")]
-    pub fn insert_all(datums: &[Self], conn: &mut PgConnection) -> Result<()> {
+    pub async fn insert_all(
+        datums: &[Self],
+        conn: &mut AsyncPgConnection,
+    ) -> Result<()> {
         diesel::insert_into(datums::table)
             .values(datums)
             .execute(conn)
+            .await
             .context("error inserting datums")?;
         Ok(())
     }

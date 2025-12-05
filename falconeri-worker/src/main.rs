@@ -15,7 +15,6 @@ use std::{
     io::{self, prelude::*},
     process,
     sync::{Arc, RwLock},
-    thread::sleep,
     time::Duration,
 };
 
@@ -23,8 +22,9 @@ use std::{
 const USAGE: &str = "Usage: falconeri-worker <job id>";
 
 /// Our main entry point.
+#[tokio::main]
 #[tracing::instrument(level = "trace")]
-fn main() -> Result<()> {
+async fn main() -> Result<()> {
     initialize_tracing();
     falconeri_common::init_openssl_probe();
 
@@ -51,14 +51,14 @@ fn main() -> Result<()> {
     // Loop until the job is done.
     loop {
         // Fetch our job, and make sure that it's still running.
-        let mut job = client.job(job_id)?;
+        let mut job = client.job(job_id).await?;
         trace!("job: {:?}", job);
         if job.status != Status::Running {
             break;
         }
 
         // Get the next datum and process it.
-        if let Some((mut datum, files)) = client.reserve_next_datum(&job)? {
+        if let Some((mut datum, files)) = client.reserve_next_datum(&job).await? {
             // Process our datum, capturing its output.
             let output = Arc::new(RwLock::new(vec![]));
             let result = process_datum(
@@ -68,7 +68,8 @@ fn main() -> Result<()> {
                 &files,
                 &job.command,
                 output.clone(),
-            );
+            )
+            .await;
             let output_str = String::from_utf8_lossy(
                 &output.read().expect("background thread panic"),
             )
@@ -76,7 +77,7 @@ fn main() -> Result<()> {
 
             // Handle the processing results.
             match result {
-                Ok(()) => client.mark_datum_as_done(&mut datum, output_str)?,
+                Ok(()) => client.mark_datum_as_done(&mut datum, output_str).await?,
                 Err(err) => {
                     error!(
                         "failed to process datum {}: {}",
@@ -86,26 +87,28 @@ fn main() -> Result<()> {
                     let error_message =
                         format!("{}", err.display_causes_without_backtrace());
                     let backtrace = format!("{}", err.backtrace());
-                    client.mark_datum_as_error(
-                        &mut datum,
-                        output_str,
-                        error_message,
-                        backtrace,
-                    )?
+                    client
+                        .mark_datum_as_error(
+                            &mut datum,
+                            output_str,
+                            error_message,
+                            backtrace,
+                        )
+                        .await?
                 }
             }
         } else {
             debug!("no datums to process right now");
 
             // Break early if the job is no longer running.
-            job = client.job(job_id)?;
+            job = client.job(job_id).await?;
             if job.status != Status::Running {
                 break;
             } else {
                 // We're still running, so wait a while and check to see if the
                 // job finishes or if some datums become available.
                 trace!("waiting for job to finish");
-                sleep(Duration::from_secs(30));
+                tokio::time::sleep(Duration::from_secs(30)).await;
             }
         }
     }
@@ -120,7 +123,7 @@ fn main() -> Result<()> {
 
 /// Process a single datum.
 #[tracing::instrument(skip(to_record), level = "trace")]
-fn process_datum(
+async fn process_datum(
     client: &Client,
     job: &Job,
     datum: &Datum,
@@ -166,12 +169,16 @@ fn process_datum(
             ));
         }
 
-        // Finish up.
-        upload_outputs(client, job, datum).context("could not upload outputs")?;
-        reset_work_dirs()?;
         Ok(())
     })
-    .expect("background panic")
+    .expect("background panic")?;
+
+    // Finish up after the command completes (outside the crossbeam scope).
+    upload_outputs(client, job, datum)
+        .await
+        .context("could not upload outputs")?;
+    reset_work_dirs()?;
+    Ok(())
 }
 
 /// Copy the stdout and stderr of `child` to either stdout or stderr,
@@ -293,7 +300,7 @@ fn reset_work_dir(work_dir: &Path) -> Result<()> {
 
 /// Upload `/pfs/out` to our output bucket.
 #[tracing::instrument(level = "debug")]
-fn upload_outputs(client: &Client, job: &Job, datum: &Datum) -> Result<()> {
+async fn upload_outputs(client: &Client, job: &Job, datum: &Datum) -> Result<()> {
     // Create records describing the files we're going to upload.
     let mut new_output_files = vec![];
     let local_paths = glob::glob("/pfs/out/**/*").context("error listing /pfs/out")?;
@@ -330,7 +337,7 @@ fn upload_outputs(client: &Client, job: &Job, datum: &Datum) -> Result<()> {
             uri: uri.clone(),
         });
     }
-    let output_files = client.create_output_files(&new_output_files)?;
+    let output_files = client.create_output_files(&new_output_files).await?;
 
     // Upload all our files in a batch, for maximum performance.
     let storage = <dyn CloudStorage>::for_uri(&job.egress_uri, &[])?;
@@ -345,7 +352,7 @@ fn upload_outputs(client: &Client, job: &Job, datum: &Datum) -> Result<()> {
         .iter()
         .map(|f| OutputFilePatch { id: f.id, status })
         .collect::<Vec<_>>();
-    client.patch_output_files(&patches)?;
+    client.patch_output_files(&patches).await?;
 
     result
 }

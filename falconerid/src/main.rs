@@ -4,11 +4,13 @@
 extern crate openssl_sys;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query},
     http::StatusCode,
     routing::{get, patch, post},
     Json, Router,
 };
+use diesel_async::{scoped_futures::ScopedFutureExt, AsyncConnection};
+
 use falconeri_common::{
     db, falconeri_common_version,
     pipeline::PipelineSpec,
@@ -19,7 +21,7 @@ use falconeri_common::{
     tracing_support::initialize_tracing,
 };
 use serde::Deserialize;
-use std::{convert::TryFrom, env, process::exit};
+use std::{env, process::exit};
 
 mod babysitter;
 pub(crate) mod inputs;
@@ -28,23 +30,19 @@ mod util;
 
 use crate::babysitter::start_babysitter;
 use crate::start_job::{retry_job, run_job};
-use crate::util::{AppState, FalconeridError, FalconeridResult, User};
+use crate::util::{AppState, DbConn, FalconeridError, FalconeridResult, User};
 
-/// initialize the server at startup.
+/// Initialize the server at startup (run migrations).
 fn initialize_server() -> Result<()> {
     // Print our some information about our environment.
     eprintln!("Running in {}", env::current_dir()?.display());
 
-    // Initialize the database.
+    // Initialize the database (sync connection for migrations).
     eprintln!("Connecting to database.");
     let mut conn = db::connect(ConnectVia::Cluster)?;
     eprintln!("Running any pending migrations.");
     db::run_pending_migrations(&mut conn)?;
     eprintln!("Finished migrations.");
-
-    eprintln!("Starting babysitter thread to monitor jobs.");
-    start_babysitter()?;
-    eprintln!("Babysitter started.");
 
     Ok(())
 }
@@ -58,16 +56,10 @@ async fn version() -> String {
 /// Create a new job from a JSON pipeline spec.
 async fn post_job(
     _user: User,
-    State(state): State<AppState>,
+    DbConn(mut conn): DbConn,
     Json(pipeline_spec): Json<PipelineSpec>,
 ) -> FalconeridResult<Json<Job>> {
-    let pool = state.pool.clone();
-    let job = tokio::task::spawn_blocking(move || {
-        let mut conn = pool.get()?;
-        run_job(&pipeline_spec, &mut conn)
-    })
-    .await
-    .map_err(|e| FalconeridError(format_err!("task panicked: {}", e)))??;
+    let job = run_job(&pipeline_spec, &mut conn).await?;
     Ok(Json(job))
 }
 
@@ -80,127 +72,97 @@ struct JobNameQuery {
 /// Look up a job and return it as JSON.
 async fn get_job_by_name(
     _user: User,
-    State(state): State<AppState>,
+    DbConn(mut conn): DbConn,
     Query(query): Query<JobNameQuery>,
 ) -> FalconeridResult<Json<Job>> {
-    let pool = state.pool.clone();
-    let job_name = query.job_name;
-    let job = tokio::task::spawn_blocking(move || {
-        let mut conn = pool.get()?;
-        Job::find_by_job_name(&job_name, &mut conn)
-    })
-    .await
-    .map_err(|e| FalconeridError(format_err!("task panicked: {}", e)))??;
+    let job = Job::find_by_job_name(&query.job_name, &mut conn).await?;
     Ok(Json(job))
 }
 
 /// Look up a job and return it as JSON.
 async fn get_job(
     _user: User,
-    State(state): State<AppState>,
+    DbConn(mut conn): DbConn,
     Path(job_id): Path<Uuid>,
 ) -> FalconeridResult<Json<Job>> {
-    let pool = state.pool.clone();
-    let job = tokio::task::spawn_blocking(move || {
-        let mut conn = pool.get()?;
-        Job::find(job_id, &mut conn)
-    })
-    .await
-    .map_err(|e| FalconeridError(format_err!("task panicked: {}", e)))??;
+    let job = Job::find(job_id, &mut conn).await?;
     Ok(Json(job))
 }
 
 /// Retry a job, and return the new job as JSON.
 async fn job_retry(
     _user: User,
-    State(state): State<AppState>,
+    DbConn(mut conn): DbConn,
     Path(job_id): Path<Uuid>,
 ) -> FalconeridResult<Json<Job>> {
-    let pool = state.pool.clone();
-    let job = tokio::task::spawn_blocking(move || {
-        let mut conn = pool.get()?;
-        let job = Job::find(job_id, &mut conn)?;
-        retry_job(&job, &mut conn)
-    })
-    .await
-    .map_err(|e| FalconeridError(format_err!("task panicked: {}", e)))??;
-    Ok(Json(job))
+    let job = Job::find(job_id, &mut conn).await?;
+    let new_job = retry_job(&job, &mut conn).await?;
+    Ok(Json(new_job))
 }
 
 /// Reserve the next available datum for a job, and return it along with a list
 /// of input files.
 async fn job_reserve_next_datum(
     _user: User,
-    State(state): State<AppState>,
+    DbConn(mut conn): DbConn,
     Path(job_id): Path<Uuid>,
     Json(request): Json<DatumReservationRequest>,
 ) -> FalconeridResult<Json<Option<DatumReservationResponse>>> {
-    let pool = state.pool.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let mut conn = pool.get()?;
-        let job = Job::find(job_id, &mut conn)?;
-        let reserved =
-            job.reserve_next_datum(&request.node_name, &request.pod_name, &mut conn)?;
-        Ok::<_, Error>(
-            reserved.map(|(datum, input_files)| DatumReservationResponse {
-                datum,
-                input_files,
-            }),
-        )
-    })
-    .await
-    .map_err(|e| FalconeridError(format_err!("task panicked: {}", e)))??;
+    let job = Job::find(job_id, &mut conn).await?;
+    let reserved = job
+        .reserve_next_datum(&request.node_name, &request.pod_name, &mut conn)
+        .await?;
+    let result = reserved
+        .map(|(datum, input_files)| DatumReservationResponse { datum, input_files });
     Ok(Json(result))
 }
 
 /// Update a datum when it's done.
 async fn patch_datum(
     _user: User,
-    State(state): State<AppState>,
+    DbConn(mut conn): DbConn,
     Path(datum_id): Path<Uuid>,
     Json(patch): Json<DatumPatch>,
 ) -> FalconeridResult<Json<Datum>> {
-    let pool = state.pool.clone();
-    let datum = tokio::task::spawn_blocking(move || {
-        let mut conn = pool.get()?;
-        let mut datum = Datum::find(datum_id, &mut conn)?;
+    let mut datum = Datum::find(datum_id, &mut conn).await?;
 
-        // We only support a few very specific types of patches.
-        match &patch {
-            // Set status to `Status::Done`.
-            DatumPatch {
-                status: Status::Done,
-                output,
-                error_message: None,
-                backtrace: None,
-            } => {
-                datum.mark_as_done(output, &mut conn)?;
-            }
-
-            // Set status to `Status::Error`.
-            DatumPatch {
-                status: Status::Error,
-                output,
-                error_message: Some(error_message),
-                backtrace: Some(backtrace),
-            } => {
-                datum.mark_as_error(output, error_message, backtrace, &mut conn)?;
-            }
-
-            // All other combinations are forbidden.
-            other => {
-                return Err(format_err!("cannot update datum with {:?}", other));
-            }
+    // We only support a few very specific types of patches.
+    match &patch {
+        // Set status to `Status::Done`.
+        DatumPatch {
+            status: Status::Done,
+            output,
+            error_message: None,
+            backtrace: None,
+        } => {
+            datum.mark_as_done(output, &mut conn).await?;
         }
 
-        // If there are no more datums, mark the job as finished (either done or
-        // error).
-        datum.update_job_status_if_done(&mut conn)?;
+        // Set status to `Status::Error`.
+        DatumPatch {
+            status: Status::Error,
+            output,
+            error_message: Some(error_message),
+            backtrace: Some(backtrace),
+        } => {
+            datum
+                .mark_as_error(output, error_message, backtrace, &mut conn)
+                .await?;
+        }
 
-        Ok::<_, Error>(datum)
-    })
-    .await
-    .map_err(|e| FalconeridError(format_err!("task panicked: {}", e)))??;
+        // All other combinations are forbidden.
+        other => {
+            return Err(FalconeridError(format_err!(
+                "cannot update datum with {:?}",
+                other
+            )));
+        }
+    }
+
+    // If there are no more datums, mark the job as finished (either done or
+    // error).
+    datum.update_job_status_if_done(&mut conn).await?;
+
     Ok(Json(datum))
 }
 
@@ -210,56 +172,46 @@ async fn patch_datum(
 /// move to our URL at some point.
 async fn create_output_files(
     _user: User,
-    State(state): State<AppState>,
+    DbConn(mut conn): DbConn,
     Json(new_output_files): Json<Vec<NewOutputFile>>,
 ) -> FalconeridResult<Json<Vec<OutputFile>>> {
-    let pool = state.pool.clone();
-    let created = tokio::task::spawn_blocking(move || {
-        let mut conn = pool.get()?;
-        NewOutputFile::insert_all(&new_output_files, &mut conn)
-    })
-    .await
-    .map_err(|e| FalconeridError(format_err!("task panicked: {}", e)))??;
+    let created = NewOutputFile::insert_all(&new_output_files, &mut conn).await?;
     Ok(Json(created))
 }
 
 /// Update a batch of output files.
 async fn patch_output_files(
     _user: User,
-    State(state): State<AppState>,
+    DbConn(mut conn): DbConn,
     Json(output_file_patches): Json<Vec<OutputFilePatch>>,
 ) -> FalconeridResult<StatusCode> {
-    let pool = state.pool.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut conn = pool.get()?;
-
-        // Separate patches by status.
-        let mut done_ids = vec![];
-        let mut error_ids = vec![];
-        for patch in output_file_patches {
-            match patch.status {
-                Status::Done => done_ids.push(patch.id),
-                Status::Error => error_ids.push(patch.id),
-                _ => {
-                    return Err(format_err!(
-                        "cannot patch output file with {:?}",
-                        patch
-                    ));
-                }
+    // Separate patches by status.
+    let mut done_ids = vec![];
+    let mut error_ids = vec![];
+    for patch in output_file_patches {
+        match patch.status {
+            Status::Done => done_ids.push(patch.id),
+            Status::Error => error_ids.push(patch.id),
+            _ => {
+                return Err(FalconeridError(format_err!(
+                    "cannot patch output file with {:?}",
+                    patch
+                )));
             }
         }
+    }
 
-        // Apply our updates.
-        conn.transaction(|conn| -> Result<()> {
-            OutputFile::mark_ids_as_done(&done_ids, conn)?;
-            OutputFile::mark_ids_as_error(&error_ids, conn)?;
-            Ok(())
-        })?;
-
-        Ok::<_, Error>(())
+    // Apply our updates.
+    conn.transaction(|conn| {
+        async move {
+            OutputFile::mark_ids_as_done(&done_ids, conn).await?;
+            OutputFile::mark_ids_as_error(&error_ids, conn).await?;
+            Ok::<_, Error>(())
+        }
+        .scope_boxed()
     })
-    .await
-    .map_err(|e| FalconeridError(format_err!("task panicked: {}", e)))??;
+    .await?;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -278,11 +230,20 @@ async fn main() -> Result<()> {
 
     // Set up application state. Use 2x CPU count for pool size to match
     // Rocket's default worker count, which was tested under heavy load.
-    let pool = db::pool(
-        u32::try_from(num_cpus::get() * 2).unwrap_or(8),
-        ConnectVia::Cluster,
-    )?;
+    let pool = db::async_pool(num_cpus::get() * 2, ConnectVia::Cluster)?;
     let admin_password = db::postgres_password(ConnectVia::Cluster)?;
+
+    // Start babysitter tokio task to monitor jobs. Give it its own pool so it
+    // can't be starved by heavy API traffic - the babysitter is critical
+    // infrastructure for detecting failed jobs and zombie datums.
+    //
+    // _babysitter_handle must be left in scope as long as this process is running,
+    // because a failed babysitter means we need to abort() the whole process.
+    eprintln!("Starting babysitter task to monitor jobs.");
+    let babysitter_pool = db::async_pool(1, ConnectVia::Cluster)?;
+    let _babysitter_handle = start_babysitter(babysitter_pool);
+    eprintln!("Babysitter started.");
+
     let state = AppState {
         pool,
         admin_password,

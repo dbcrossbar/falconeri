@@ -1,6 +1,5 @@
 //! The REST API for `falconerid`, including data types and a client.
 
-use reqwest::blocking as reqwest;
 use serde::de::DeserializeOwned;
 use url::Url;
 
@@ -111,7 +110,7 @@ impl Client {
     ///
     /// `POST /jobs`
     #[tracing::instrument(level = "trace")]
-    pub fn new_job(&self, pipeline_spec: &PipelineSpec) -> Result<Job> {
+    pub async fn new_job(&self, pipeline_spec: &PipelineSpec) -> Result<Job> {
         let url = self.url.join("jobs")?;
         let resp = self
             .client
@@ -119,45 +118,52 @@ impl Client {
             .basic_auth(&self.username, Some(&self.password))
             .json(pipeline_spec)
             .send()
+            .await
             .with_context(|| format!("error posting {}", url))?;
-        self.handle_json_response(&url, resp)
+        self.handle_json_response(&url, resp).await
     }
 
     /// Fetch a job by ID.
     ///
     /// `GET /jobs/<job_id>`
     #[tracing::instrument(level = "trace")]
-    pub fn job(&self, id: Uuid) -> Result<Job> {
+    pub async fn job(&self, id: Uuid) -> Result<Job> {
         let url = self.url.join(&format!("jobs/{}", id))?;
-        self.via.retry_if_appropriate(|| {
-            let resp = self
-                .client
-                .get(url.clone())
-                .basic_auth(&self.username, Some(&self.password))
-                .send()
-                .with_context(|| format!("error getting {}", url))?;
-            self.handle_json_response(&url, resp)
-        })
+        self.via
+            .retry_if_appropriate_async(|| async {
+                let resp = self
+                    .client
+                    .get(url.clone())
+                    .basic_auth(&self.username, Some(&self.password))
+                    .send()
+                    .await
+                    .with_context(|| format!("error getting {}", url))?;
+                self.handle_json_response(&url, resp).await
+            })
+            .await
     }
 
     /// Fetch a job by name.
     ///
     /// `GET /jobs?job_name=$NAME`
     #[tracing::instrument(level = "trace")]
-    pub fn find_job_by_name(&self, job_name: &str) -> Result<Job> {
+    pub async fn find_job_by_name(&self, job_name: &str) -> Result<Job> {
         let mut url = self.url.join("jobs")?;
         url.query_pairs_mut()
             .append_pair("job_name", job_name)
             .finish();
-        self.via.retry_if_appropriate(|| {
-            let resp = self
-                .client
-                .get(url.clone())
-                .basic_auth(&self.username, Some(&self.password))
-                .send()
-                .with_context(|| format!("error getting {}", url))?;
-            self.handle_json_response(&url, resp)
-        })
+        self.via
+            .retry_if_appropriate_async(|| async {
+                let resp = self
+                    .client
+                    .get(url.clone())
+                    .basic_auth(&self.username, Some(&self.password))
+                    .send()
+                    .await
+                    .with_context(|| format!("error getting {}", url))?;
+                self.handle_json_response(&url, resp).await
+            })
+            .await
     }
 
     /// Retry a job by ID.
@@ -166,15 +172,16 @@ impl Client {
     ///
     /// `POST /jobs/<job_id>/retry`
     #[tracing::instrument(level = "trace")]
-    pub fn retry_job(&self, job: &Job) -> Result<Job> {
+    pub async fn retry_job(&self, job: &Job) -> Result<Job> {
         let url = self.url.join(&format!("jobs/{}/retry", job.id))?;
         let resp = self
             .client
             .post(url.clone())
             .basic_auth(&self.username, Some(&self.password))
             .send()
+            .await
             .with_context(|| format!("error posting {}", url))?;
-        self.handle_json_response(&url, resp)
+        self.handle_json_response(&url, resp).await
     }
 
     /// Reserve the next available datum to process, and return it along with
@@ -183,15 +190,16 @@ impl Client {
     ///
     /// `POST /jobs/<job_id>/reserve_next_datum`
     #[tracing::instrument(level = "trace")]
-    pub fn reserve_next_datum(
+    pub async fn reserve_next_datum(
         &self,
         job: &Job,
     ) -> Result<Option<(Datum, Vec<InputFile>)>> {
         let url = self
             .url
             .join(&format!("jobs/{}/reserve_next_datum", job.id))?;
-        let resv_resp: Option<DatumReservationResponse> =
-            self.via.retry_if_appropriate(|| {
+        let resv_resp: Option<DatumReservationResponse> = self
+            .via
+            .retry_if_appropriate_async(|| async {
                 let resp = self
                     .client
                     .post(url.clone())
@@ -201,28 +209,34 @@ impl Client {
                         pod_name: pod_name()?,
                     })
                     .send()
+                    .await
                     .with_context(|| format!("error posting {}", url))?;
-                self.handle_json_response(&url, resp)
-            })?;
+                self.handle_json_response(&url, resp).await
+            })
+            .await?;
         Ok(resv_resp.map(|r| (r.datum, r.input_files)))
     }
 
     /// Mark `datum` as done, and record the output of the commands we ran.
     #[tracing::instrument(level = "trace")]
-    pub fn mark_datum_as_done(&self, datum: &mut Datum, output: String) -> Result<()> {
+    pub async fn mark_datum_as_done(
+        &self,
+        datum: &mut Datum,
+        output: String,
+    ) -> Result<()> {
         let patch = DatumPatch {
             status: Status::Done,
             output,
             error_message: None,
             backtrace: None,
         };
-        self.patch_datum(datum, &patch)
+        self.patch_datum(datum, &patch).await
     }
 
     /// Mark `datum` as having failed, and record the output and error
     /// information.
     #[tracing::instrument(level = "trace")]
-    pub fn mark_datum_as_error(
+    pub async fn mark_datum_as_error(
         &self,
         datum: &mut Datum,
         output: String,
@@ -235,25 +249,29 @@ impl Client {
             error_message: Some(error_message),
             backtrace: Some(backtrace),
         };
-        self.patch_datum(datum, &patch)
+        self.patch_datum(datum, &patch).await
     }
 
     /// Apply `patch` to `datum`.
     ///
     /// `PATCH /datums/<datum_id>`
     #[tracing::instrument(level = "trace")]
-    fn patch_datum(&self, datum: &mut Datum, patch: &DatumPatch) -> Result<()> {
+    async fn patch_datum(&self, datum: &mut Datum, patch: &DatumPatch) -> Result<()> {
         let url = self.url.join(&format!("datums/{}", datum.id))?;
-        let updated_datum = self.via.retry_if_appropriate(|| {
-            let resp = self
-                .client
-                .patch(url.clone())
-                .basic_auth(&self.username, Some(&self.password))
-                .json(patch)
-                .send()
-                .with_context(|| format!("error patching {}", url))?;
-            self.handle_json_response(&url, resp)
-        })?;
+        let updated_datum = self
+            .via
+            .retry_if_appropriate_async(|| async {
+                let resp = self
+                    .client
+                    .patch(url.clone())
+                    .basic_auth(&self.username, Some(&self.password))
+                    .json(patch)
+                    .send()
+                    .await
+                    .with_context(|| format!("error patching {}", url))?;
+                self.handle_json_response(&url, resp).await
+            })
+            .await?;
         *datum = updated_datum;
         Ok(())
     }
@@ -262,7 +280,7 @@ impl Client {
     ///
     /// `POST /output_files`
     #[tracing::instrument(level = "trace")]
-    pub fn create_output_files(
+    pub async fn create_output_files(
         &self,
         files: &[NewOutputFile],
     ) -> Result<Vec<OutputFile>> {
@@ -271,67 +289,86 @@ impl Client {
         // idempotent. Though I suppose if we encounter a "double create", all
         // the retries should just fail until we give up, then we'll eventually
         // fail the datum, allowing it to be retried.
-        self.via.retry_if_appropriate(|| {
-            let resp = self
-                .client
-                .post(url.clone())
-                .basic_auth(&self.username, Some(&self.password))
-                .json(files)
-                .send()
-                .with_context(|| format!("error posting {}", url))?;
-            self.handle_json_response(&url, resp)
-        })
+        self.via
+            .retry_if_appropriate_async(|| async {
+                let resp = self
+                    .client
+                    .post(url.clone())
+                    .basic_auth(&self.username, Some(&self.password))
+                    .json(files)
+                    .send()
+                    .await
+                    .with_context(|| format!("error posting {}", url))?;
+                self.handle_json_response(&url, resp).await
+            })
+            .await
     }
 
     /// Update the status of existing output files.
     ///
     /// PATCH /output_files
     #[tracing::instrument(level = "trace")]
-    pub fn patch_output_files(&self, patches: &[OutputFilePatch]) -> Result<()> {
+    pub async fn patch_output_files(&self, patches: &[OutputFilePatch]) -> Result<()> {
         let url = self.url.join("output_files")?;
-        self.via.retry_if_appropriate(|| -> Result<()> {
-            let resp = self
-                .client
-                .patch(url.clone())
-                .basic_auth(&self.username, Some(&self.password))
-                .json(patches)
-                .send()
-                .with_context(|| format!("error patching {}", url))?;
-            self.handle_empty_response(&url, resp)
-        })
+        self.via
+            .retry_if_appropriate_async(|| async {
+                let resp = self
+                    .client
+                    .patch(url.clone())
+                    .basic_auth(&self.username, Some(&self.password))
+                    .json(patches)
+                    .send()
+                    .await
+                    .with_context(|| format!("error patching {}", url))?;
+                self.handle_empty_response(&url, resp).await
+            })
+            .await
     }
 
     /// Check the HTTP status code and parse a JSON response.
     #[tracing::instrument(level = "trace")]
-    fn handle_json_response<T>(&self, url: &Url, resp: reqwest::Response) -> Result<T>
+    async fn handle_json_response<T>(
+        &self,
+        url: &Url,
+        resp: reqwest::Response,
+    ) -> Result<T>
     where
         T: DeserializeOwned,
     {
         if resp.status().is_success() {
             let value = resp
                 .json()
+                .await
                 .with_context(|| format!("error parsing {}", url))?;
             Ok(value)
         } else {
-            Err(self.handle_error_response(url, resp))
+            Err(self.handle_error_response(url, resp).await)
         }
     }
 
     /// Check the HTTP status code and parse a JSON response.
     #[tracing::instrument(level = "trace")]
-    fn handle_empty_response(&self, url: &Url, resp: reqwest::Response) -> Result<()> {
+    async fn handle_empty_response(
+        &self,
+        url: &Url,
+        resp: reqwest::Response,
+    ) -> Result<()> {
         if resp.status().is_success() {
             Ok(())
         } else {
-            Err(self.handle_error_response(url, resp))
+            Err(self.handle_error_response(url, resp).await)
         }
     }
 
     /// Extract an error from an HTTP respone payload.
     #[tracing::instrument(level = "trace")]
-    fn handle_error_response(&self, url: &Url, resp: reqwest::Response) -> Error {
+    async fn handle_error_response(
+        &self,
+        url: &Url,
+        resp: reqwest::Response,
+    ) -> Error {
         let status = resp.status();
-        match resp.text() {
+        match resp.text().await {
             Ok(body) => {
                 format_err!("unexpected HTTP status {} for {}:\n{}", status, url, body,)
             }

@@ -1,3 +1,5 @@
+use diesel_async::RunQueryDsl;
+
 use crate::prelude::*;
 use crate::schema::*;
 
@@ -23,12 +25,13 @@ impl InputFile {
     /// Fetch all the input files corresponding to `datums`, returning grouped
     /// in the same order.
     #[tracing::instrument(skip(conn), level = "trace")]
-    pub fn for_datums(
+    pub async fn for_datums(
         datums: &[Datum],
-        conn: &mut PgConnection,
+        conn: &mut AsyncPgConnection,
     ) -> Result<Vec<Vec<InputFile>>> {
         Ok(InputFile::belonging_to(datums)
             .load(conn)
+            .await
             .context("could not load input files belonging to failed datums")?
             .grouped_by(datums))
     }
@@ -64,10 +67,14 @@ pub struct NewInputFile {
 impl NewInputFile {
     /// Insert a new job into the database.
     #[tracing::instrument(skip(conn), level = "trace")]
-    pub fn insert_all(input_files: &[Self], conn: &mut PgConnection) -> Result<()> {
+    pub async fn insert_all(
+        input_files: &[Self],
+        conn: &mut AsyncPgConnection,
+    ) -> Result<()> {
         diesel::insert_into(input_files::table)
             .values(input_files)
             .execute(conn)
+            .await
             .context("error inserting input file")?;
         Ok(())
     }

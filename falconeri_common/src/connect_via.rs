@@ -1,6 +1,7 @@
 //! How should we connect to PostgreSQL and `falconerid`?
 
 use backoff::{self, retry, ExponentialBackoff};
+use std::future::Future;
 use std::result;
 
 use crate::prelude::*;
@@ -69,5 +70,40 @@ impl ConnectVia {
                 backoff::Error::Permanent(err) => err,
             })?;
         Ok(value)
+    }
+
+    /// Async version of `retry_if_appropriate` for use with async HTTP clients.
+    #[tracing::instrument(skip(f), level = "trace")]
+    pub async fn retry_if_appropriate_async<F, Fut, T>(self, mut f: F) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        // Wrap `f` up into an operation that results in an appropriate
+        // `backoff::Error` on failure.
+        let operation = || {
+            let fut = f();
+            async move {
+                fut.await.map_err(|err| {
+                    if self.should_retry_by_default() {
+                        error!("retrying after error: {}", err);
+                        backoff::Error::Transient {
+                            err,
+                            retry_after: None,
+                        }
+                    } else {
+                        backoff::Error::Permanent(err)
+                    }
+                })
+            }
+        };
+
+        // Specify what kind of backoff to use.
+        let backoff = ExponentialBackoff::default();
+
+        // Run our operation, retrying if necessary. The future::retry function
+        // returns the inner error type directly on failure (not wrapped in
+        // backoff::Error).
+        backoff::future::retry(backoff, operation).await
     }
 }

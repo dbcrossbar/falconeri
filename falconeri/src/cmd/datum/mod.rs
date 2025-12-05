@@ -18,8 +18,8 @@ pub enum Opt {
 }
 
 /// Run the `job` subcommand.
-pub fn run(opt: &Opt) -> Result<()> {
+pub async fn run(opt: &Opt) -> Result<()> {
     match opt {
-        Opt::Describe { id } => describe::run(*id),
+        Opt::Describe { id } => describe::run(*id).await,
     }
 }

@@ -4,10 +4,11 @@ use falconeri_common::{db, prelude::*};
 use prettytable::{format::consts::FORMAT_CLEAN, row, Table};
 
 /// The `job list` subcommand.
-pub fn run() -> Result<()> {
+pub async fn run() -> Result<()> {
     // Look up the information to display.
-    let mut conn = db::connect(ConnectVia::Proxy)?;
-    let jobs = Job::list(&mut conn)?;
+    let pool = db::async_pool(1, ConnectVia::Proxy)?;
+    let mut conn = pool.get().await.context("could not get db connection")?;
+    let jobs = Job::list(&mut conn).await?;
 
     // Create a new table. This library makes some rather unusual API choices,
     // but it does the job well enough.

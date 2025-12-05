@@ -38,6 +38,7 @@ pub mod prelude {
     pub use anyhow::{format_err, Context};
     pub use chrono::{NaiveDateTime, Utc};
     pub use diesel::{self, prelude::*, PgConnection};
+    pub use diesel_async::AsyncPgConnection;
     pub use serde::{Deserialize, Serialize};
     pub use std::{
         collections::HashMap,

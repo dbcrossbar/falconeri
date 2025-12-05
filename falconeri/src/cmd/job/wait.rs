@@ -1,15 +1,15 @@
 //! The `job wait` subcommand.
 
 use falconeri_common::{prelude::*, rest_api::Client};
-use std::{thread::sleep, time::Duration};
+use std::time::Duration;
 
 /// The `job wait` subcommand.
-pub fn run(job_name: &str) -> Result<()> {
+pub async fn run(job_name: &str) -> Result<()> {
     let client = Client::new(ConnectVia::Proxy)?;
-    let mut job = client.find_job_by_name(job_name)?;
+    let mut job = client.find_job_by_name(job_name).await?;
     while !job.status.has_finished() {
-        sleep(Duration::from_secs(30));
-        job = client.job(job.id)?;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        job = client.job(job.id).await?;
     }
     println!("{}", job.status);
     Ok(())

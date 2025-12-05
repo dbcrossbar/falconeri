@@ -13,7 +13,7 @@ use std::result;
 #[derive(Clone)]
 pub struct AppState {
     /// Database connection pool.
-    pub pool: db::Pool,
+    pub pool: db::AsyncPool,
     /// Admin password for authentication.
     pub admin_password: String,
 }
@@ -56,6 +56,25 @@ fn parse_basic_auth(header: &str) -> Option<(String, String)> {
     let credentials = String::from_utf8(decoded).ok()?;
     let (user, pass) = credentials.split_once(':')?;
     Some((user.to_owned(), pass.to_owned()))
+}
+
+/// A database connection from the pool, extracted automatically by Axum.
+pub struct DbConn(pub db::AsyncPooledConn);
+
+impl FromRequestParts<AppState> for DbConn {
+    type Rejection = FalconeridError;
+
+    async fn from_request_parts(
+        _parts: &mut Parts,
+        state: &AppState,
+    ) -> result::Result<Self, Self::Rejection> {
+        let conn = state
+            .pool
+            .get()
+            .await
+            .map_err(|e| FalconeridError(format_err!("pool error: {}", e)))?;
+        Ok(DbConn(conn))
+    }
 }
 
 /// An error type for `falconerid`. Ideally, this should be an enum with members

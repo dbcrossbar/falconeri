@@ -17,13 +17,14 @@ struct Params {
 }
 
 /// The `job describe` subcommand.
-pub fn run(job_name: &str) -> Result<()> {
+pub async fn run(job_name: &str) -> Result<()> {
     // Load the data we want to display.
-    let mut conn = db::connect(ConnectVia::Proxy)?;
-    let job = Job::find_by_job_name(job_name, &mut conn)?;
-    let datum_status_counts = job.datum_status_counts(&mut conn)?;
-    let running_datums = job.datums_with_status(Status::Running, &mut conn)?;
-    let error_datums = job.datums_with_status(Status::Error, &mut conn)?;
+    let pool = db::async_pool(1, ConnectVia::Proxy)?;
+    let mut conn = pool.get().await.context("could not get db connection")?;
+    let job = Job::find_by_job_name(job_name, &mut conn).await?;
+    let datum_status_counts = job.datum_status_counts(&mut conn).await?;
+    let running_datums = job.datums_with_status(Status::Running, &mut conn).await?;
+    let error_datums = job.datums_with_status(Status::Error, &mut conn).await?;
     let params = Params {
         job,
         datum_status_counts,

@@ -56,21 +56,21 @@ pub enum Opt {
 }
 
 /// Run the `job` subcommand.
-pub fn run(opt: &Opt) -> Result<()> {
+pub async fn run(opt: &Opt) -> Result<()> {
     match opt {
-        Opt::Describe { job_name } => describe::run(job_name),
-        Opt::List => list::run(),
-        Opt::Retry { job_name } => retry::run(job_name),
+        Opt::Describe { job_name } => describe::run(job_name).await,
+        Opt::List => list::run().await,
+        Opt::Retry { job_name } => retry::run(job_name).await,
         Opt::Run { pipeline_json } => {
             let f =
                 File::open(pipeline_json).context("can't open pipeline JSON file")?;
             let pipeline_spec: PipelineSpec = serde_json::from_reader(f)
                 .context("can't parse pipeline JSON file")?;
-            run::run(&pipeline_spec)
+            run::run(&pipeline_spec).await
         }
         // Disabled because it's broken by recurive `"input"` types.
         //
         // Opt::Schema => schema::run(),
-        Opt::Wait { job_name } => wait::run(job_name),
+        Opt::Wait { job_name } => wait::run(job_name).await,
     }
 }
