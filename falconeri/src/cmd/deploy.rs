@@ -110,7 +110,7 @@ pub struct Opt {
 }
 
 /// Deploy `falconeri` to the current Kubernetes cluster.
-pub fn run(opt: &Opt) -> Result<()> {
+pub async fn run(opt: &Opt) -> Result<()> {
     // Generate a password using the system's "secure" random number generator.
     let mut rng = StdRng::from_os_rng();
     let postgres_password = iter::repeat(())
@@ -155,7 +155,7 @@ pub fn run(opt: &Opt) -> Result<()> {
 
     // Combine our manifests, only including the secret if we need it.
     let mut manifest = String::new();
-    if !opt.skip_secret && !kubernetes::resource_exists("secret/falconeri")? {
+    if !opt.skip_secret && !kubernetes::resource_exists("secret/falconeri").await? {
         manifest.push_str(&secret_manifest);
     }
     manifest.push_str(&deploy_manifest);
@@ -164,13 +164,13 @@ pub fn run(opt: &Opt) -> Result<()> {
         // Print out our manifests.
         print!("{}", manifest);
     } else {
-        kubernetes::deploy(&manifest)?;
+        kubernetes::deploy(&manifest).await?;
     }
     Ok(())
 }
 
 /// Undeploy `falconeri`, removing it from the cluster.
-pub fn run_undeploy(all: bool) -> Result<()> {
+pub async fn run_undeploy(all: bool) -> Result<()> {
     // Clean up things declared by our regular manifest.
     let params = DeployManifestParams {
         all,
@@ -179,11 +179,11 @@ pub fn run_undeploy(all: bool) -> Result<()> {
         config: default_config(false),
     };
     let manifest = render_manifest(DEPLOY_MANIFEST, &params)?;
-    kubernetes::undeploy(&manifest)?;
+    kubernetes::undeploy(&manifest).await?;
 
     // Clean up our secrets manually instead of rending a new manifest.
     if all {
-        kubernetes::delete("secret/falconeri")?;
+        kubernetes::delete("secret/falconeri").await?;
     }
 
     Ok(())

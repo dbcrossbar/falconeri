@@ -1,9 +1,11 @@
 //! Support for AWS S3 storage.
 
+use async_trait::async_trait;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde_json;
-use std::{fs, process};
+use std::{fs, process::Stdio};
+use tokio::process::Command;
 
 use super::CloudStorage;
 use crate::kubernetes::{base64_encoded_secret_string, kubectl_secret};
@@ -32,12 +34,12 @@ impl S3Storage {
     /// Create a new `S3Storage` backend.
     #[allow(clippy::new_ret_no_self)]
     #[tracing::instrument(level = "trace")]
-    pub fn new(secrets: &[Secret]) -> Result<Self> {
+    pub async fn new(secrets: &[Secret]) -> Result<Self> {
         let secret = secrets.iter().find(|s| {
             matches!(s, Secret::Env { env_var, .. } if env_var == "AWS_ACCESS_KEY_ID")
         });
         let secret_data = if let Some(Secret::Env { name, .. }) = secret {
-            Some(kubectl_secret(name)?)
+            Some(kubectl_secret(name).await?)
         } else {
             None
         };
@@ -47,17 +49,17 @@ impl S3Storage {
     /// Construct a new `S3Storage` backend, using an AWS access key from
     /// the Kubernetes secret `secret_name`.
     #[tracing::instrument(level = "trace")]
-    pub fn new_with_secret(secret_name: &str) -> Result<Self> {
+    pub async fn new_with_secret(secret_name: &str) -> Result<Self> {
         Ok(S3Storage {
-            secret_data: kubectl_secret(secret_name)?,
+            secret_data: kubectl_secret(secret_name).await?,
         })
     }
 
     /// Build a `Command` object which calls the `aws` CLI tool, including any
     /// authentication that we happen to have.
     #[tracing::instrument(level = "trace")]
-    fn aws_command(&self) -> process::Command {
-        let mut command = process::Command::new("aws");
+    fn aws_command(&self) -> Command {
+        let mut command = Command::new("aws");
         if let Some(secret_data) = &self.secret_data {
             command.env("AWS_ACCESS_KEY_ID", &secret_data.aws_access_key_id);
             command.env("AWS_SECRET_ACCESS_KEY", &secret_data.aws_secret_access_key);
@@ -73,9 +75,10 @@ impl fmt::Debug for S3Storage {
     }
 }
 
+#[async_trait]
 impl CloudStorage for S3Storage {
     #[tracing::instrument(level = "trace")]
-    fn list(&self, uri: &str) -> Result<Vec<String>> {
+    async fn list(&self, uri: &str) -> Result<Vec<String>> {
         trace!("listing {}", uri);
 
         let (bucket, key) = parse_s3_url(uri)?;
@@ -84,7 +87,7 @@ impl CloudStorage for S3Storage {
             prefix.push('/');
         }
 
-        // Use `aws` to list our bucket, and parse the results.parse_s3_url(
+        // Use `aws` to list our bucket, and parse the results.
         let output = self
             .aws_command()
             .args(["s3api", "list-objects-v2"])
@@ -92,9 +95,10 @@ impl CloudStorage for S3Storage {
             .arg(bucket)
             .arg("--prefix")
             .arg(prefix.clone())
-            .stderr(process::Stdio::inherit())
+            .stderr(Stdio::inherit())
             .output()
-            .context("could not run gsutil")?;
+            .await
+            .context("could not run aws")?;
         if !output.status.success() {
             return Err(format_err!("could not list {:?}: {}", uri, output.status));
         }
@@ -122,7 +126,7 @@ impl CloudStorage for S3Storage {
     }
 
     #[tracing::instrument(level = "trace")]
-    fn sync_down(&self, uri: &str, local_path: &Path) -> Result<()> {
+    async fn sync_down(&self, uri: &str, local_path: &Path) -> Result<()> {
         trace!("downloading {} to {}", uri, local_path.display());
         if uri.ends_with('/') {
             fs::create_dir_all(local_path)
@@ -133,6 +137,7 @@ impl CloudStorage for S3Storage {
                 .arg(uri)
                 .arg(local_path)
                 .status()
+                .await
                 .context("could not run aws s3")?;
             if !status.success() {
                 return Err(format_err!("could not download {:?}: {}", uri, status));
@@ -148,6 +153,7 @@ impl CloudStorage for S3Storage {
                 .arg(uri)
                 .arg(local_path)
                 .status()
+                .await
                 .context("could not run aws s3")?;
             if !status.success() {
                 return Err(format_err!("could not download {:?}: {}", uri, status));
@@ -157,7 +163,7 @@ impl CloudStorage for S3Storage {
     }
 
     #[tracing::instrument(level = "trace")]
-    fn sync_up(&self, local_path: &Path, uri: &str) -> Result<()> {
+    async fn sync_up(&self, local_path: &Path, uri: &str) -> Result<()> {
         trace!("uploading {} to {}", local_path.display(), uri);
 
         // We assume that we only need to support directories, namely /pfs/out.
@@ -167,7 +173,8 @@ impl CloudStorage for S3Storage {
             .arg(local_path)
             .arg(uri)
             .status()
-            .context("could not run gsutil")?;
+            .await
+            .context("could not run aws s3")?;
         if !status.success() {
             return Err(format_err!(
                 "could not upload {:?}: {}",

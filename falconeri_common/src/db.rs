@@ -1,14 +1,14 @@
 //! Database utilities.
 
 use anyhow::anyhow;
-use diesel::sql_query;
-use diesel::sql_types::BigInt;
 pub use diesel_async::pooled_connection::deadpool::Object as PooledConnection;
 pub use diesel_async::pooled_connection::deadpool::Pool as AsyncPoolInner;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
+use diesel_async::AsyncConnection;
+use diesel_async::AsyncMigrationHarness;
 pub use diesel_async::AsyncPgConnection;
-use diesel_migrations::{HarnessWithOutput, MigrationHarness};
-use std::{env, fs::read_to_string, io};
+use diesel_migrations::MigrationHarness;
+use std::{env, fs::read_to_string};
 
 use crate::kubernetes::{base64_encoded_secret_string, kubectl_secret};
 use crate::prelude::*;
@@ -30,7 +30,7 @@ struct FalconeriSecretData {
 
 /// Look up our PostgreSQL password in our cluster's `falconeri` secret.
 #[tracing::instrument(level = "trace")]
-pub fn postgres_password(via: ConnectVia) -> Result<String> {
+pub async fn postgres_password(via: ConnectVia) -> Result<String> {
     match via {
         ConnectVia::Proxy => {
             trace!("Fetching POSTGRES_PASSWORD from secret `falconeri`");
@@ -39,7 +39,7 @@ pub fn postgres_password(via: ConnectVia) -> Result<String> {
             // kubectl get secret falconeri -o json |
             //     jq -r .data.POSTGRES_PASSWORD |
             //     base64 --decode
-            let secret_data: FalconeriSecretData = kubectl_secret("falconeri")?;
+            let secret_data: FalconeriSecretData = kubectl_secret("falconeri").await?;
             Ok(secret_data.postgres_password)
         }
         ConnectVia::Cluster => {
@@ -52,7 +52,7 @@ pub fn postgres_password(via: ConnectVia) -> Result<String> {
 
 /// Get an appropriate database URL.
 #[tracing::instrument(level = "trace")]
-pub fn database_url(via: ConnectVia) -> Result<String> {
+pub async fn database_url(via: ConnectVia) -> Result<String> {
     // Check the environment first, so it can be overridden for testing outside
     // of a full Kubernetes setup.
     if let Ok(database_url) = env::var("DATABASE_URL") {
@@ -60,7 +60,7 @@ pub fn database_url(via: ConnectVia) -> Result<String> {
     }
 
     // Build a URL.
-    let password = postgres_password(via)?;
+    let password = postgres_password(via).await?;
     match via {
         ConnectVia::Proxy => {
             let host = env::var("FALCONERI_PROXY_HOST")
@@ -74,18 +74,6 @@ pub fn database_url(via: ConnectVia) -> Result<String> {
     }
 }
 
-/// Connect to PostgreSQL synchronously. Used for migrations at startup.
-#[tracing::instrument(level = "trace")]
-pub fn connect(via: ConnectVia) -> Result<PgConnection> {
-    let database_url = database_url(via)?;
-
-    let conn = via
-        .retry_if_appropriate(|| Ok(PgConnection::establish(&database_url)?))
-        .with_context(|| format!("Error connecting to {}", database_url))?;
-
-    Ok(conn)
-}
-
 /// An async database connection pool using deadpool.
 pub type AsyncPool = AsyncPoolInner<AsyncPgConnection>;
 
@@ -94,8 +82,8 @@ pub type AsyncPooledConn = PooledConnection<AsyncPgConnection>;
 
 /// Create an async connection pool using the specified parameters.
 #[tracing::instrument(level = "trace")]
-pub fn async_pool(pool_size: usize, via: ConnectVia) -> Result<AsyncPool> {
-    let database_url = database_url(via)?;
+pub async fn async_pool(pool_size: usize, via: ConnectVia) -> Result<AsyncPool> {
+    let database_url = database_url(via).await?;
     let config = AsyncDieselConnectionManager::<AsyncPgConnection>::new(database_url);
     AsyncPoolInner::builder(config)
         .max_size(pool_size)
@@ -111,34 +99,35 @@ pub fn async_pool(pool_size: usize, via: ConnectVia) -> Result<AsyncPool> {
 /// database. We use a pool here just to get the right connection type.
 ///
 /// TODO: Consider moving all callers to the REST API.
-pub fn async_client_pool() -> Result<AsyncPool> {
-    async_pool(1, ConnectVia::Proxy)
+pub async fn async_client_pool() -> Result<AsyncPool> {
+    async_pool(1, ConnectVia::Proxy).await
 }
 
-/// The ID of the advisory lock that we use for migrations. Random.
-const MIGRATION_LOCK_ID: i64 = 5_275_218_930_720_578_783;
+/// Establish a direct async connection to the database.
+///
+/// This is used for migrations where we need a raw connection rather than
+/// a pooled one.
+#[tracing::instrument(level = "trace")]
+pub async fn async_connect(via: ConnectVia) -> Result<AsyncPgConnection> {
+    let url = database_url(via).await?;
+    via.retry_if_appropriate_async(|| async {
+        AsyncPgConnection::establish(&url)
+            .await
+            .context("Error connecting to database")
+    })
+    .await
+}
 
-/// Run any pending migrations, and print to standard output.
-/// This uses a synchronous connection since it runs at startup before
-/// the async runtime is fully initialized.
+/// Run any pending migrations.
+///
+/// Uses `AsyncMigrationHarness` which internally uses `block_in_place` to run
+/// diesel's sync migration infrastructure without blocking the async runtime.
 #[tracing::instrument(skip(conn), level = "trace")]
-pub fn run_pending_migrations(conn: &mut PgConnection) -> Result<()> {
+pub fn run_pending_migrations(conn: AsyncPgConnection) -> Result<AsyncPgConnection> {
     debug!("Running pending migrations");
-    conn.transaction(|conn| -> Result<()> {
-        // Take an advisory lock before running the migration. It's safe to
-        // generate this SQL by hand because MIGRATION_LOCK_ID is an integer.
-        let lock_sql = sql_query("SELECT pg_advisory_xact_lock(?)");
-        lock_sql
-            .bind::<BigInt, _>(MIGRATION_LOCK_ID)
-            .execute(conn)
-            .context("error taking advisory lock for migrations")?;
-
-        let mut stdout = io::stdout();
-        let mut harness = HarnessWithOutput::new(conn, &mut stdout);
-        harness
-            .run_pending_migrations(migrations::MIGRATIONS)
-            .map_err(|e| anyhow!("could not run migrations: {}", e))?;
-        Ok(())
-    })?;
-    Ok(())
+    let mut harness = AsyncMigrationHarness::new(conn);
+    harness
+        .run_pending_migrations(migrations::MIGRATIONS)
+        .map_err(|e| anyhow!("could not run migrations: {}", e))?;
+    Ok(harness.into_inner())
 }

@@ -33,15 +33,17 @@ use crate::start_job::{retry_job, run_job};
 use crate::util::{AppState, DbConn, FalconeridError, FalconeridResult, User};
 
 /// Initialize the server at startup (run migrations).
-fn initialize_server() -> Result<()> {
+async fn initialize_server() -> Result<()> {
     // Print our some information about our environment.
     eprintln!("Running in {}", env::current_dir()?.display());
 
-    // Initialize the database (sync connection for migrations).
+    // Initialize the database and run migrations.
     eprintln!("Connecting to database.");
-    let mut conn = db::connect(ConnectVia::Cluster)?;
+    let conn = db::async_connect(ConnectVia::Cluster).await?;
     eprintln!("Running any pending migrations.");
-    db::run_pending_migrations(&mut conn)?;
+    // run_pending_migrations takes ownership and returns the connection.
+    // We don't need the connection after migrations, so we can drop it.
+    let _conn = db::run_pending_migrations(conn)?;
     eprintln!("Finished migrations.");
 
     Ok(())
@@ -220,7 +222,7 @@ async fn main() -> Result<()> {
     initialize_tracing();
     falconeri_common::init_openssl_probe();
 
-    if let Err(err) = initialize_server() {
+    if let Err(err) = initialize_server().await {
         eprintln!(
             "Failed to initialize server:\n{}",
             err.display_causes_and_backtrace()
@@ -230,8 +232,8 @@ async fn main() -> Result<()> {
 
     // Set up application state. Use 2x CPU count for pool size to match
     // Rocket's default worker count, which was tested under heavy load.
-    let pool = db::async_pool(num_cpus::get() * 2, ConnectVia::Cluster)?;
-    let admin_password = db::postgres_password(ConnectVia::Cluster)?;
+    let pool = db::async_pool(num_cpus::get() * 2, ConnectVia::Cluster).await?;
+    let admin_password = db::postgres_password(ConnectVia::Cluster).await?;
 
     // Start babysitter tokio task to monitor jobs. Give it its own pool so it
     // can't be starved by heavy API traffic - the babysitter is critical
@@ -240,7 +242,7 @@ async fn main() -> Result<()> {
     // _babysitter_handle must be left in scope as long as this process is running,
     // because a failed babysitter means we need to abort() the whole process.
     eprintln!("Starting babysitter task to monitor jobs.");
-    let babysitter_pool = db::async_pool(1, ConnectVia::Cluster)?;
+    let babysitter_pool = db::async_pool(1, ConnectVia::Cluster).await?;
     let _babysitter_handle = start_babysitter(babysitter_pool);
     eprintln!("Babysitter started.");
 

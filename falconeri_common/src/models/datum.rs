@@ -76,7 +76,7 @@ impl Datum {
     pub async fn zombies(conn: &mut AsyncPgConnection) -> Result<Vec<Datum>> {
         let running = Self::active_with_status(Status::Running, conn).await?;
         trace!("running datums: {:?}", running);
-        let running_pod_names = kubernetes::get_running_pod_names()?;
+        let running_pod_names = kubernetes::get_running_pod_names().await?;
         Ok(running
             .into_iter()
             .filter(|datum| match &datum.pod_name {

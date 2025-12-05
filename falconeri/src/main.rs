@@ -79,11 +79,11 @@ async fn run() -> Result<()> {
 
     match opt {
         Opt::Datum { ref cmd } => cmd::datum::run(cmd).await,
-        Opt::Db { ref cmd } => cmd::db::run(cmd),
-        Opt::Deploy { ref cmd } => cmd::deploy::run(cmd),
+        Opt::Db { ref cmd } => cmd::db::run(cmd).await,
+        Opt::Deploy { ref cmd } => cmd::deploy::run(cmd).await,
         Opt::Job { ref cmd } => cmd::job::run(cmd).await,
-        Opt::Migrate => cmd::migrate::run(),
-        Opt::Proxy => cmd::proxy::run(),
-        Opt::Undeploy { all } => cmd::deploy::run_undeploy(all),
+        Opt::Migrate => cmd::migrate::run().await,
+        Opt::Proxy => cmd::proxy::run().await,
+        Opt::Undeploy { all } => cmd::deploy::run_undeploy(all).await,
     }
 }

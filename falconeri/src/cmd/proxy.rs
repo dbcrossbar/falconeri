@@ -1,18 +1,26 @@
 //! The `proxy` subcommand.
 
-use crossbeam::scope;
 use falconeri_common::{kubernetes, prelude::*};
 
 /// Run our proxy.
-pub fn run() -> Result<()> {
-    scope(|scope| -> Result<()> {
-        scope.spawn(|_| forward("svc/falconeri-postgres", "5432:5432"));
-        scope.spawn(|_| forward("svc/falconerid", "8089:8089"));
-        Ok(())
-    })
-    .expect("background scope panic")
+pub async fn run() -> Result<()> {
+    let postgres_handle =
+        tokio::spawn(async { forward("svc/falconeri-postgres", "5432:5432").await });
+    let falconerid_handle =
+        tokio::spawn(async { forward("svc/falconerid", "8089:8089").await });
+
+    // Wait for either to complete (they run forever until interrupted).
+    tokio::select! {
+        result = postgres_handle => {
+            result.context("postgres proxy task panicked")??;
+        }
+        result = falconerid_handle => {
+            result.context("falconerid proxy task panicked")??;
+        }
+    }
+    Ok(())
 }
 
-fn forward(service: &str, port: &str) -> Result<()> {
-    kubernetes::kubectl(&["port-forward", service, port])
+async fn forward(service: &str, port: &str) -> Result<()> {
+    kubernetes::kubectl(&["port-forward", service, port]).await
 }

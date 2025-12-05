@@ -54,7 +54,8 @@ pub async fn run_job(
         job_id,
         maximum_allowed_run_count,
         &pipeline_spec.input,
-    )?;
+    )
+    .await?;
 
     // Insert everthing into the database.
     let job = conn
@@ -70,7 +71,7 @@ pub async fn run_job(
         .await?;
 
     // Launch our batch job on the cluster.
-    start_batch_job(pipeline_spec, &job)?;
+    start_batch_job(pipeline_spec, &job).await?;
     Ok(job)
 }
 
@@ -146,7 +147,7 @@ pub async fn retry_job(job: &Job, conn: &mut AsyncPgConnection) -> Result<Job> {
         .await?;
 
     // Start a new batch job.
-    start_batch_job(&pipeline_spec, &new_job)?;
+    start_batch_job(&pipeline_spec, &new_job).await?;
     Ok(new_job)
 }
 
@@ -183,14 +184,14 @@ impl<'a> JobParams<'a> {
 }
 
 /// Start a new batch job running.
-pub fn start_batch_job(pipeline_spec: &PipelineSpec, job: &Job) -> Result<()> {
+pub async fn start_batch_job(pipeline_spec: &PipelineSpec, job: &Job) -> Result<()> {
     debug!("starting batch job on cluster");
 
     // Set up our template parameters, rendder our template, and deploy it.
     let params = JobParams::new(pipeline_spec, job);
     let manifest = render_manifest(RUN_MANIFEST_TEMPLATE, &params)
         .context("error rendering job template")?;
-    kubernetes::deploy(&manifest)?;
+    kubernetes::deploy(&manifest).await?;
 
     Ok(())
 }

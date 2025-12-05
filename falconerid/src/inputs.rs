@@ -1,5 +1,8 @@
 //! Convert JSON `"input"` clauses to datums which will be assigned to workers.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use falconeri_common::{
     models::{NewDatum, NewInputFile},
     pipeline::{Glob, Input},
@@ -64,7 +67,7 @@ impl InputFileData {
 ///
 /// Returns the datums and associated input files in a form well-suited to bulk
 /// database insert.
-pub fn input_to_datums(
+pub async fn input_to_datums(
     secrets: &[Secret],
     job_id: Uuid,
     maximum_allowed_run_count: i32,
@@ -72,7 +75,7 @@ pub fn input_to_datums(
 ) -> Result<(Vec<NewDatum>, Vec<NewInputFile>)> {
     let mut all_datums = vec![];
     let mut all_input_files = vec![];
-    for datum_data in input_to_datums_helper(secrets, input)? {
+    for datum_data in input_to_datums_helper(secrets, input).await? {
         let (datum, input_files) = datum_data
             .into_new_datum_and_input_files(job_id, maximum_allowed_run_count);
         all_datums.push(datum);
@@ -86,30 +89,32 @@ pub fn input_to_datums(
 ///
 /// This is the internal helper version of `input_to_datums` that works on the
 /// simpler `DatumData` instead of database-ready `NewDatum` records.
-fn input_to_datums_helper(
-    secrets: &[Secret],
-    input: &Input,
-) -> Result<Vec<DatumData>> {
-    match input {
-        Input::Atom { uri, repo, glob } => {
-            atom_to_datums_helper(secrets, uri, repo, *glob)
-        }
-        Input::Cross(inputs) => cross_to_datums_helper(secrets, inputs),
-        Input::Union(inputs) => {
-            // Merge all our inputs. We could do this cleverly using `flat_map`
-            // and `collect` to manage the errors, but it's clearer with a `for`
-            // loop.
-            let mut datums = vec![];
-            for child in inputs {
-                datums.extend(input_to_datums_helper(secrets, child)?);
+fn input_to_datums_helper<'a>(
+    secrets: &'a [Secret],
+    input: &'a Input,
+) -> Pin<Box<dyn Future<Output = Result<Vec<DatumData>>> + Send + 'a>> {
+    Box::pin(async move {
+        match input {
+            Input::Atom { uri, repo, glob } => {
+                atom_to_datums_helper(secrets, uri, repo, *glob).await
             }
-            Ok(datums)
+            Input::Cross(inputs) => cross_to_datums_helper(secrets, inputs).await,
+            Input::Union(inputs) => {
+                // Merge all our inputs. We could do this cleverly using `flat_map`
+                // and `collect` to manage the errors, but it's clearer with a `for`
+                // loop.
+                let mut datums = vec![];
+                for child in inputs {
+                    datums.extend(input_to_datums_helper(secrets, child).await?);
+                }
+                Ok(datums)
+            }
         }
-    }
+    })
 }
 
 /// Convert a single `Input::Atom` to a list of datums.
-fn atom_to_datums_helper(
+async fn atom_to_datums_helper(
     secrets: &[Secret],
     uri: &str,
     repo: &str,
@@ -126,8 +131,8 @@ fn atom_to_datums_helper(
     // `Glob::TopLevelDirectoryEntries` and `Glob::WholeRepo`, because we want
     // to verify that we can actually list the contents of a `Glob::WholeRepo`
     // _before_ spinning up a big cluster job.
-    let storage = <dyn CloudStorage>::for_uri(uri, secrets)?;
-    let file_uris = storage.list(uri)?;
+    let storage = <dyn CloudStorage>::for_uri(uri, secrets).await?;
+    let file_uris = storage.list(uri).await?;
 
     match glob {
         // Our input file is just the entire repo, as a directory.
@@ -162,43 +167,46 @@ fn atom_to_datums_helper(
 /// You can cause a denial-of-service by calculating the cross product of
 /// enormous repos, or by passing in so many repos that the stack overflows. But
 /// since our input comes from a local user, this is fine for now.
-fn cross_to_datums_helper(
-    secrets: &[Secret],
-    inputs: &[Input],
-) -> Result<Vec<DatumData>> {
-    match inputs.len() {
-        // Base cases.
-        0 => Ok(vec![]),
-        1 => input_to_datums_helper(secrets, &inputs[0]),
+fn cross_to_datums_helper<'a>(
+    secrets: &'a [Secret],
+    inputs: &'a [Input],
+) -> Pin<Box<dyn Future<Output = Result<Vec<DatumData>>> + Send + 'a>> {
+    Box::pin(async move {
+        match inputs.len() {
+            // Base cases.
+            0 => Ok(vec![]),
+            1 => input_to_datums_helper(secrets, &inputs[0]).await,
 
-        // Recursive case.
-        n => {
-            // Recursively calculate the cross product of all but our last input.
-            let datums_0 = cross_to_datums_helper(secrets, &inputs[0..n - 1])?;
+            // Recursive case.
+            n => {
+                // Recursively calculate the cross product of all but our last input.
+                let datums_0 =
+                    cross_to_datums_helper(secrets, &inputs[0..n - 1]).await?;
 
-            // Process our last input.
-            let datums_1 = input_to_datums_helper(secrets, &inputs[n - 1])?;
+                // Process our last input.
+                let datums_1 = input_to_datums_helper(secrets, &inputs[n - 1]).await?;
 
-            // Build our cross product between the recursive `datums_0` and our
-            // local `datums_1`.
-            let mut output = vec![];
-            for datum_0 in &datums_0 {
-                for datum_1 in &datums_1 {
-                    let input_files_0 = &datum_0.input_files;
-                    let input_files_1 = &datum_1.input_files;
-                    let len_0 = input_files_0.len();
-                    let len_1 = input_files_1.len();
-                    let mut combined = Vec::with_capacity(len_0 + len_1);
-                    combined.extend(input_files_0.iter().cloned());
-                    combined.extend(input_files_1.iter().cloned());
-                    output.push(DatumData {
-                        input_files: combined,
-                    })
+                // Build our cross product between the recursive `datums_0` and our
+                // local `datums_1`.
+                let mut output = vec![];
+                for datum_0 in &datums_0 {
+                    for datum_1 in &datums_1 {
+                        let input_files_0 = &datum_0.input_files;
+                        let input_files_1 = &datum_1.input_files;
+                        let len_0 = input_files_0.len();
+                        let len_1 = input_files_1.len();
+                        let mut combined = Vec::with_capacity(len_0 + len_1);
+                        combined.extend(input_files_0.iter().cloned());
+                        combined.extend(input_files_1.iter().cloned());
+                        output.push(DatumData {
+                            input_files: combined,
+                        })
+                    }
                 }
+                Ok(output)
             }
-            Ok(output)
         }
-    }
+    })
 }
 
 /// Given a URI and a repo name, construct a local path starting with "/pfs"

@@ -1,6 +1,8 @@
 //! Support for Google Cloud Storage.
 
-use std::{collections::HashSet, fs, io::BufRead, process};
+use async_trait::async_trait;
+use std::{collections::HashSet, fs, io::BufRead, process::Stdio};
+use tokio::process::Command;
 
 use super::CloudStorage;
 use crate::prelude::*;
@@ -20,16 +22,18 @@ impl GoogleCloudStorage {
     }
 }
 
+#[async_trait]
 impl CloudStorage for GoogleCloudStorage {
     #[tracing::instrument(level = "trace")]
-    fn list(&self, uri: &str) -> Result<Vec<String>> {
+    async fn list(&self, uri: &str) -> Result<Vec<String>> {
         trace!("listing {}", uri);
         // Shell out to gsutil to list the files we want to process.
-        let output = process::Command::new("gsutil")
+        let output = Command::new("gsutil")
             .arg("ls")
             .arg(uri)
-            .stderr(process::Stdio::inherit())
+            .stderr(Stdio::inherit())
             .output()
+            .await
             .context("error running gsutil")?;
         if !output.status.success() {
             return Err(format_err!("could not list {:?}: {}", uri, output.status));
@@ -45,7 +49,7 @@ impl CloudStorage for GoogleCloudStorage {
     }
 
     #[tracing::instrument(level = "trace")]
-    fn sync_down(&self, uri: &str, local_path: &Path) -> Result<()> {
+    async fn sync_down(&self, uri: &str, local_path: &Path) -> Result<()> {
         if uri.ends_with('/') {
             // We have a directory. If our source URI ends in `/`, so should our
             // `local_path`, since we generate these ourselves.
@@ -56,11 +60,12 @@ impl CloudStorage for GoogleCloudStorage {
             trace!("syncing {} to {}", uri, local_path.display());
             fs::create_dir_all(local_path)
                 .context("cannot create local download directory")?;
-            let status = process::Command::new("gsutil")
+            let status = Command::new("gsutil")
                 .args(["-m", "rsync"])
                 .arg(uri)
                 .arg(local_path)
                 .status()
+                .await
                 .context("could not run gsutil rsync")?;
             if !status.success() {
                 return Err(format_err!("could not download {:?}: {}", uri, status));
@@ -72,11 +77,12 @@ impl CloudStorage for GoogleCloudStorage {
                 fs::create_dir_all(parent)
                     .context("cannot create local download directory")?;
             }
-            let status = process::Command::new("gsutil")
+            let status = Command::new("gsutil")
                 .args(["-m", "cp", "-r"])
                 .arg(uri)
                 .arg(local_path)
                 .status()
+                .await
                 .context("could not run gsutil cp")?;
             if !status.success() {
                 return Err(format_err!("could not download {:?}: {}", uri, status));
@@ -86,13 +92,14 @@ impl CloudStorage for GoogleCloudStorage {
     }
 
     #[tracing::instrument(level = "trace")]
-    fn sync_up(&self, local_path: &Path, uri: &str) -> Result<()> {
+    async fn sync_up(&self, local_path: &Path, uri: &str) -> Result<()> {
         trace!("uploading {} to {}", local_path.display(), uri);
-        let status = process::Command::new("gsutil")
+        let status = Command::new("gsutil")
             .args(["-m", "rsync", "-r"])
             .arg(local_path)
             .arg(uri)
             .status()
+            .await
             .context("could not run gsutil")?;
         if !status.success() {
             return Err(format_err!(

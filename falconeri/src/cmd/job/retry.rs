@@ -4,12 +4,12 @@ use falconeri_common::{prelude::*, rest_api::Client};
 
 /// The `job retry` subcommand.
 pub async fn run(job_name: &str) -> Result<()> {
-    let mut client = Client::new(ConnectVia::Proxy)?;
+    let mut client = Client::new(ConnectVia::Proxy).await?;
     let job = client.find_job_by_name(job_name).await?;
     // TODO: We need to create a new client here because we don't have HTTP
     // keepalive set up, and we don't have a good way to run `retry_job`
     // idempotently yet.
-    client = Client::new(ConnectVia::Proxy)?;
+    client = Client::new(ConnectVia::Proxy).await?;
     let new_job = client.retry_job(&job).await?;
     println!("{}", new_job.job_name);
     Ok(())

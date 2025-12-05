@@ -5,19 +5,19 @@ use rand::{rng, Rng};
 use serde::de::{Deserialize, DeserializeOwned};
 use serde_json;
 use std::collections::HashSet;
-use std::{
-    env, iter,
-    process::{Command, Stdio},
-};
+use std::{env, iter, process::Stdio};
+use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
 
 use crate::prelude::*;
 
 /// Run `kubectl`, passing any output through to the console.
 #[tracing::instrument(level = "trace")]
-pub fn kubectl(args: &[&str]) -> Result<()> {
+pub async fn kubectl(args: &[&str]) -> Result<()> {
     let status = Command::new("kubectl")
         .args(args)
         .status()
+        .await
         .with_context(|| format!("error starting kubectl with {:?}", args))?;
     if !status.success() {
         return Err(format_err!("error running kubectl with {:?}", args));
@@ -28,12 +28,13 @@ pub fn kubectl(args: &[&str]) -> Result<()> {
 /// Run `kubectl`, capture output as JSON, and parse it using the
 /// specified type.
 #[tracing::instrument(level = "trace")]
-pub fn kubectl_parse_json<T: DeserializeOwned>(args: &[&str]) -> Result<T> {
+pub async fn kubectl_parse_json<T: DeserializeOwned>(args: &[&str]) -> Result<T> {
     let output = Command::new("kubectl")
         .args(args)
         // Pass `stderr` through on console instead of capturing.
         .stderr(Stdio::inherit())
         .output()
+        .await
         .with_context(|| format!("error starting kubectl with {:?}", args))?;
     if !output.status.success() {
         return Err(format_err!("error running kubectl with {:?}", args));
@@ -44,20 +45,21 @@ pub fn kubectl_parse_json<T: DeserializeOwned>(args: &[&str]) -> Result<T> {
 
 /// Run `kubectl` with the specified input.
 #[tracing::instrument(level = "trace")]
-pub fn kubectl_with_input(args: &[&str], input: &str) -> Result<()> {
+pub async fn kubectl_with_input(args: &[&str], input: &str) -> Result<()> {
     let mut child = Command::new("kubectl")
         .args(args)
         .stdin(Stdio::piped())
         .spawn()
         .with_context(|| format!("error starting kubectl with {:?}", args))?;
-    write!(
-        child.stdin.as_mut().expect("child stdin is missing"),
-        "{}",
-        input
-    )
-    .with_context(|| format!("error writing intput to kubectl {:?}", args))?;
+    let mut stdin = child.stdin.take().expect("child stdin is missing");
+    stdin
+        .write_all(input.as_bytes())
+        .await
+        .with_context(|| format!("error writing input to kubectl {:?}", args))?;
+    drop(stdin); // Close stdin so kubectl knows we're done
     let status = child
         .wait()
+        .await
         .with_context(|| format!("error running kubectl with {:?}", args))?;
     if !status.success() {
         return Err(format_err!("error running kubectl with {:?}", args));
@@ -67,8 +69,8 @@ pub fn kubectl_with_input(args: &[&str], input: &str) -> Result<()> {
 
 /// Does `kubectl` exit successfully when called with the specified arguments?
 #[tracing::instrument(level = "trace")]
-pub fn kubectl_succeeds(args: &[&str]) -> Result<bool> {
-    let output = Command::new("kubectl").args(args).output()?;
+pub async fn kubectl_succeeds(args: &[&str]) -> Result<bool> {
+    let output = Command::new("kubectl").args(args).output().await?;
     Ok(output.status.success())
 }
 
@@ -109,9 +111,9 @@ pub mod base64_encoded_secret_string {
 
 /// Fetch a secret and deserialize it as the specified type.
 #[tracing::instrument(level = "trace")]
-pub fn kubectl_secret<T: DeserializeOwned>(secret: &str) -> Result<T> {
+pub async fn kubectl_secret<T: DeserializeOwned>(secret: &str) -> Result<T> {
     let secret: Secret<T> =
-        kubectl_parse_json(&["get", "secret", secret, "-o", "json"])?;
+        kubectl_parse_json(&["get", "secret", secret, "-o", "json"]).await?;
     Ok(secret.data)
 }
 
@@ -165,7 +167,7 @@ struct StatusJson {
 
 /// Get a set of currently running pod names.
 #[tracing::instrument(level = "trace")]
-pub fn get_running_pod_names() -> Result<HashSet<String>> {
+pub async fn get_running_pod_names() -> Result<HashSet<String>> {
     let pods = kubectl_parse_json::<ItemsJson<ResourceJson>>(&[
         "get",
         "pods",
@@ -175,7 +177,8 @@ pub fn get_running_pod_names() -> Result<HashSet<String>> {
         // "--field-selector",
         // "status.phase=Running",
         "--output=json",
-    ])?;
+    ])
+    .await?;
 
     let mut names = HashSet::new();
     for pod in &pods.items {
@@ -198,12 +201,13 @@ pub fn get_running_pod_names() -> Result<HashSet<String>> {
 
 /// Get a set of all job names present on the cluster.
 #[tracing::instrument(level = "trace")]
-pub fn get_all_job_names() -> Result<HashSet<String>> {
+pub async fn get_all_job_names() -> Result<HashSet<String>> {
     let jobs = kubectl_parse_json::<ItemsJson<ResourceJson>>(&[
         "get",
         "jobs",
         "--output=json",
-    ])?;
+    ])
+    .await?;
 
     let mut names = HashSet::new();
     for job in &jobs.items {
@@ -219,23 +223,23 @@ pub fn get_all_job_names() -> Result<HashSet<String>> {
 }
 
 /// Deploy a manifest to our Kubernetes cluster.
-pub fn deploy(manifest: &str) -> Result<()> {
-    kubectl_with_input(&["apply", "-f", "-"], manifest)
+pub async fn deploy(manifest: &str) -> Result<()> {
+    kubectl_with_input(&["apply", "-f", "-"], manifest).await
 }
 
 /// Delete all resources specified in the manifest from our Kubernetes cluster.
-pub fn undeploy(manifest: &str) -> Result<()> {
-    kubectl_with_input(&["delete", "-f", "-"], manifest)
+pub async fn undeploy(manifest: &str) -> Result<()> {
+    kubectl_with_input(&["delete", "-f", "-"], manifest).await
 }
 
 /// Does the specified resource exist?
-pub fn resource_exists(resource_id: &str) -> Result<bool> {
-    kubectl_succeeds(&["get", resource_id])
+pub async fn resource_exists(resource_id: &str) -> Result<bool> {
+    kubectl_succeeds(&["get", resource_id]).await
 }
 
 /// Delete the specified Kubernetes resource.
-pub fn delete(resource_id: &str) -> Result<()> {
-    kubectl(&["delete", resource_id])
+pub async fn delete(resource_id: &str) -> Result<()> {
+    kubectl(&["delete", resource_id]).await
 }
 
 /// Generate a hopefully unique tag for a Kubernetes resource. To keep

@@ -3,19 +3,17 @@
 // Needed for static linking to work right on Linux.
 extern crate openssl_sys;
 
-use crossbeam::{self, thread::Scope};
 use falconeri_common::{
     prelude::*,
     rest_api::{Client, OutputFilePatch},
     storage::CloudStorage,
     tracing_support::initialize_tracing,
 };
-use std::{
-    env, fs,
-    io::{self, prelude::*},
-    process,
-    sync::{Arc, RwLock},
-    time::Duration,
+use std::{env, fs, io::ErrorKind, process::Stdio, sync::Arc, time::Duration};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    process::{Child, Command},
+    sync::RwLock,
 };
 
 /// Instructions on how to use this program.
@@ -33,20 +31,20 @@ async fn main() -> Result<()> {
     let args = env::args().collect::<Vec<_>>();
     if args.len() != 2 {
         eprintln!("{}", USAGE);
-        process::exit(1);
+        std::process::exit(1);
     }
     if args[1] == "--version" {
         println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-        process::exit(0);
+        std::process::exit(0);
     } else if args[1] == "--help" {
         println!("{}", USAGE);
-        process::exit(0);
+        std::process::exit(0);
     }
     let job_id = args[1].parse::<Uuid>().context("can't parse job ID")?;
     debug!("job ID: {}", job_id);
 
     // Create a REST client.
-    let client = Client::new(ConnectVia::Cluster)?;
+    let client = Client::new(ConnectVia::Cluster).await?;
 
     // Loop until the job is done.
     loop {
@@ -70,10 +68,8 @@ async fn main() -> Result<()> {
                 output.clone(),
             )
             .await;
-            let output_str = String::from_utf8_lossy(
-                &output.read().expect("background thread panic"),
-            )
-            .into_owned();
+            let output_str =
+                String::from_utf8_lossy(&output.read().await).into_owned();
 
             // Handle the processing results.
             match result {
@@ -129,7 +125,7 @@ async fn process_datum(
     datum: &Datum,
     files: &[InputFile],
     cmd: &[String],
-    to_record: Arc<RwLock<dyn Write + Send + Sync>>,
+    to_record: Arc<RwLock<Vec<u8>>>,
 ) -> Result<()> {
     debug!("processing datum {}", datum.id);
 
@@ -138,42 +134,39 @@ async fn process_datum(
     for file in files {
         // We don't pass in any `secrets` here, because those are supposed to
         // be specified in our Kubernetes job when it's created.
-        let storage = <dyn CloudStorage>::for_uri(&file.uri, &[])?;
-        storage.sync_down(&file.uri, Path::new(&file.local_path))?;
+        let storage = <dyn CloudStorage>::for_uri(&file.uri, &[]).await?;
+        storage
+            .sync_down(&file.uri, Path::new(&file.local_path))
+            .await?;
     }
 
-    // Set up a worker thread scope so that we can handle background I/O.
-    crossbeam::scope(|scope| -> Result<()> {
-        // Run our command.
-        if cmd.is_empty() {
-            return Err(format_err!("job {} command is empty", job.id));
-        }
-        let mut child = process::Command::new(&cmd[0])
-            .args(&cmd[1..])
-            .stdout(process::Stdio::piped())
-            .stderr(process::Stdio::piped())
-            .spawn()
-            .with_context(|| format!("could not run {:?}", &cmd[0]))?;
+    // Run our command.
+    if cmd.is_empty() {
+        return Err(format_err!("job {} command is empty", job.id));
+    }
+    let mut child = Command::new(&cmd[0])
+        .args(&cmd[1..])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("could not run {:?}", &cmd[0]))?;
 
-        // Listen on stdout.
-        tee_child(scope, &mut child, to_record)?;
+    // Tee stdout and stderr using tokio tasks.
+    tee_child(&mut child, to_record).await?;
 
-        let status = child
-            .wait()
-            .with_context(|| format!("error running {:?}", &cmd[0]))?;
-        if !status.success() {
-            return Err(format_err!(
-                "command {:?} failed with status {}",
-                cmd,
-                status
-            ));
-        }
+    let status = child
+        .wait()
+        .await
+        .with_context(|| format!("error running {:?}", &cmd[0]))?;
+    if !status.success() {
+        return Err(format_err!(
+            "command {:?} failed with status {}",
+            cmd,
+            status
+        ));
+    }
 
-        Ok(())
-    })
-    .expect("background panic")?;
-
-    // Finish up after the command completes (outside the crossbeam scope).
+    // Finish up after the command completes.
     upload_outputs(client, job, datum)
         .await
         .context("could not upload outputs")?;
@@ -186,65 +179,64 @@ async fn process_datum(
 ///
 /// This function will panic if `child` does not have a `stdout` or `stderr`.
 #[tracing::instrument(skip(to_record), level = "trace")]
-fn tee_child(
-    scope: &Scope,
-    child: &mut process::Child,
-    to_record: Arc<RwLock<dyn Write + Send + Sync>>,
-) -> Result<()> {
-    // Tee `stdout`.
-    let mut stdout = child
+async fn tee_child(child: &mut Child, to_record: Arc<RwLock<Vec<u8>>>) -> Result<()> {
+    let stdout = child
         .stdout
         .take()
         .expect("child should always have a stdout");
-    let to_record_for_stdout = to_record.clone();
-    let stdout_handle = scope.spawn(move |_| {
-        tee_output(&mut stdout, &mut io::stdout(), to_record_for_stdout)
-    });
-
-    // Tee `stderr`.
-    let mut stderr = child
+    let stderr = child
         .stderr
         .take()
         .expect("child should always have a stderr");
+
+    let to_record_for_stdout = to_record.clone();
     let to_record_for_stderr = to_record.clone();
-    let stderr_handle = scope.spawn(move |_| {
-        tee_output(&mut stderr, &mut io::stderr(), to_record_for_stderr)
+
+    // Spawn tasks to handle stdout and stderr concurrently.
+    let stdout_handle = tokio::spawn(async move {
+        tee_output(stdout, tokio::io::stdout(), to_record_for_stdout).await
+    });
+    let stderr_handle = tokio::spawn(async move {
+        tee_output(stderr, tokio::io::stderr(), to_record_for_stderr).await
     });
 
-    // Wait for our child process to close `stdout` and `stderr`, or at least
-    // for Rust to return 0-byte reads and writes.
-    stdout_handle.join().expect("background panic")?;
-    stderr_handle.join().expect("background panic")?;
+    // Wait for both to complete.
+    stdout_handle.await.context("stdout task panicked")??;
+    stderr_handle.await.context("stderr task panicked")??;
 
     Ok(())
 }
 
 /// Copy output from `from_child` to `to_console` and `to_record`.
 #[tracing::instrument(skip(from_child, to_console, to_record), level = "trace")]
-fn tee_output(
-    from_child: &mut dyn Read,
-    to_console: &mut dyn Write,
-    to_record: Arc<RwLock<dyn Write>>,
-) -> Result<()> {
+async fn tee_output<R, W>(
+    mut from_child: R,
+    mut to_console: W,
+    to_record: Arc<RwLock<Vec<u8>>>,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     // Use a small buffer, because I/O performance doesn't matter for reading
     // output to the user.
     let mut buf = vec![0; 4 * 1024];
     loop {
-        match from_child.read(&mut buf) {
+        match from_child.read(&mut buf).await {
             // No more output, so give up.
             Ok(0) => return Ok(()),
             // We have output, so print it.
             Ok(count) => {
                 let data = &buf[..count];
-                to_console.write(data).context("error writing to console")?;
-                to_record
-                    .write()
-                    .expect("background panic")
-                    .write(data)
-                    .context("error writing to record")?;
+                to_console
+                    .write_all(data)
+                    .await
+                    .context("error writing to console")?;
+                to_console.flush().await.context("error flushing console")?;
+                to_record.write().await.extend_from_slice(data);
             }
-            // Retry if reading was interrupted by kernal shenigans.
-            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
+            // Retry if reading was interrupted by kernel shenanigans.
+            Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
             // An actual error occurred.
             Err(e) => {
                 return Err(e).context("error reading from child process");
@@ -340,8 +332,10 @@ async fn upload_outputs(client: &Client, job: &Job, datum: &Datum) -> Result<()>
     let output_files = client.create_output_files(&new_output_files).await?;
 
     // Upload all our files in a batch, for maximum performance.
-    let storage = <dyn CloudStorage>::for_uri(&job.egress_uri, &[])?;
-    let result = storage.sync_up(Path::new("/pfs/out/"), &job.egress_uri);
+    let storage = <dyn CloudStorage>::for_uri(&job.egress_uri, &[]).await?;
+    let result = storage
+        .sync_up(Path::new("/pfs/out/"), &job.egress_uri)
+        .await;
     let status = match result {
         Ok(()) => Status::Done,
         Err(_) => Status::Error,

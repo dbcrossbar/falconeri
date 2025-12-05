@@ -85,7 +85,7 @@ async fn check_for_finished_and_vanished_jobs(
     conn: &mut AsyncPgConnection,
 ) -> Result<()> {
     let jobs = Job::find_by_status(Status::Running, conn).await?;
-    let all_job_names = get_all_job_names()?;
+    let all_job_names = get_all_job_names().await?;
     for mut job in jobs {
         let all_job_names = &all_job_names;
         conn.transaction(|conn| {

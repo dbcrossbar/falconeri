@@ -3,7 +3,8 @@
 use falconeri_common::{db, prelude::*};
 
 /// Run the `migrate` subcommand.
-pub fn run() -> Result<()> {
-    let mut conn = db::connect(ConnectVia::Proxy)?;
-    db::run_pending_migrations(&mut conn)
+pub async fn run() -> Result<()> {
+    let conn = db::async_connect(ConnectVia::Proxy).await?;
+    db::run_pending_migrations(conn)?;
+    Ok(())
 }

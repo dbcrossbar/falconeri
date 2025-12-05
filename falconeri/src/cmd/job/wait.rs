@@ -5,7 +5,7 @@ use std::time::Duration;
 
 /// The `job wait` subcommand.
 pub async fn run(job_name: &str) -> Result<()> {
-    let client = Client::new(ConnectVia::Proxy)?;
+    let client = Client::new(ConnectVia::Proxy).await?;
     let mut job = client.find_job_by_name(job_name).await?;
     while !job.status.has_finished() {
         tokio::time::sleep(Duration::from_secs(30)).await;

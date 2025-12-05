@@ -19,7 +19,7 @@ struct Params {
 /// The `job describe` subcommand.
 pub async fn run(job_name: &str) -> Result<()> {
     // Load the data we want to display.
-    let pool = db::async_client_pool()?;
+    let pool = db::async_client_pool().await?;
     let mut conn = pool.get().await.context("could not get db connection")?;
     let job = Job::find_by_job_name(job_name, &mut conn).await?;
     let datum_status_counts = job.datum_status_counts(&mut conn).await?;

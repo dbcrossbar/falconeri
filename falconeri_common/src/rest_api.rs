@@ -64,7 +64,7 @@ pub struct Client {
 impl Client {
     /// Create a new client, connecting to `falconerid` as specified.
     #[tracing::instrument(level = "trace")]
-    pub fn new(via: ConnectVia) -> Result<Client> {
+    pub async fn new(via: ConnectVia) -> Result<Client> {
         // Choose an appropriate URL.
         let url = match via {
             ConnectVia::Cluster => "http://falconerid:8089/",
@@ -76,7 +76,7 @@ impl Client {
         // Get our credentials. For now, we use our database password for API
         // access, too.
         let username = "falconeri".to_owned();
-        let password = db::postgres_password(via)?;
+        let password = db::postgres_password(via).await?;
 
         // Decide how long to keep connections open.
         let max_idle = match via {
