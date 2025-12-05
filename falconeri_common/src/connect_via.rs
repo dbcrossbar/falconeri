@@ -1,8 +1,8 @@
 //! How should we connect to PostgreSQL and `falconerid`?
 
-use backoff::{self, retry, ExponentialBackoff};
+use backon::{BlockingRetryable, ExponentialBuilder, Retryable};
 use std::future::Future;
-use std::result;
+use std::time::Duration;
 
 use crate::prelude::*;
 
@@ -34,76 +34,38 @@ impl ConnectVia {
         }
     }
 
+    /// Create a backoff configuration matching our previous behavior.
+    fn backoff_config() -> ExponentialBuilder {
+        ExponentialBuilder::default()
+            .with_min_delay(Duration::from_millis(500))
+            .with_jitter()
+            .without_max_times()
+    }
+
     /// Run the function `f`. If `self.should_retry_by_default()` is true, retry
     /// failures using exponential backoff. Return either the result or the final
     /// final failure.
     #[tracing::instrument(skip(f), level = "trace")]
-    pub fn retry_if_appropriate<F, T>(self, mut f: F) -> Result<T>
+    pub fn retry_if_appropriate<F, T>(self, f: F) -> Result<T>
     where
         F: FnMut() -> Result<T>,
     {
-        // Wrap `f` up into an operation that results am appropriate
-        // `backoff::Error` on failure.
-        let operation = || -> result::Result<T, backoff::Error<Error>> {
-            f().map_err(|err| {
-                if self.should_retry_by_default() {
-                    error!("retrying after error: {}", err);
-                    backoff::Error::Transient {
-                        err,
-                        retry_after: None,
-                    }
-                } else {
-                    backoff::Error::Permanent(err)
-                }
-            })
-        };
-
-        // Specify what kind of backoff to use.
-        let backoff = ExponentialBackoff::default();
-
-        // Run our operation, retrying if necessary.
-        let value = retry(backoff, operation)
-            // Unwrap the backoff error into something we can handle. This should
-            // have been built in.
-            .map_err(|e| match e {
-                backoff::Error::Transient { err, .. } => err,
-                backoff::Error::Permanent(err) => err,
-            })?;
-        Ok(value)
+        f.retry(Self::backoff_config())
+            .when(|_| self.should_retry_by_default())
+            .notify(|err, _dur| error!("retrying after error: {}", err))
+            .call()
     }
 
     /// Async version of `retry_if_appropriate` for use with async HTTP clients.
     #[tracing::instrument(skip(f), level = "trace")]
-    pub async fn retry_if_appropriate_async<F, Fut, T>(self, mut f: F) -> Result<T>
+    pub async fn retry_if_appropriate_async<F, Fut, T>(self, f: F) -> Result<T>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = Result<T>>,
     {
-        // Wrap `f` up into an operation that results in an appropriate
-        // `backoff::Error` on failure.
-        let operation = || {
-            let fut = f();
-            async move {
-                fut.await.map_err(|err| {
-                    if self.should_retry_by_default() {
-                        error!("retrying after error: {}", err);
-                        backoff::Error::Transient {
-                            err,
-                            retry_after: None,
-                        }
-                    } else {
-                        backoff::Error::Permanent(err)
-                    }
-                })
-            }
-        };
-
-        // Specify what kind of backoff to use.
-        let backoff = ExponentialBackoff::default();
-
-        // Run our operation, retrying if necessary. The future::retry function
-        // returns the inner error type directly on failure (not wrapped in
-        // backoff::Error).
-        backoff::future::retry(backoff, operation).await
+        f.retry(Self::backoff_config())
+            .when(|_| self.should_retry_by_default())
+            .notify(|err, _dur| error!("retrying after error: {}", err))
+            .await
     }
 }

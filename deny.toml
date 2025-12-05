@@ -4,24 +4,13 @@
 
 [advisories]
 ignore = [
-    # `ansi_term` is unmaintained (dependency of structopt). Should upgrade to clap.
-    "RUSTSEC-2021-0139",
-    # `atty` is unmaintained and has potential unaligned read (dependency of structopt).
-    "RUSTSEC-2021-0145",
-    "RUSTSEC-2024-0375",
-    # `backoff` is unmaintained. Consider switching to `backon`.
-    "RUSTSEC-2025-0012",
-    # `instant` is unmaintained (dependency of backoff).
-    "RUSTSEC-2024-0384",
-    # `proc-macro-error` is unmaintained (dependency of structopt).
-    "RUSTSEC-2024-0370",
 ]
 
 [licenses]
 # Allow common non-restrictive licenses. ISC is used for various DNS and crypto
 # things, and it's a minimally restrictive open source license.
 # Licenses not in this list will be denied (including copyleft and AGPL).
-allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "BSD-2-Clause", "CC0-1.0", "ISC", "OpenSSL", "Zlib", "Unicode-3.0", "Unicode-DFS-2016"]
+allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "BSD-2-Clause", "ISC", "Zlib", "Unicode-3.0"]
 
 [[licenses.clarify]]
 # Ring has a messy license.
@@ -45,12 +34,25 @@ deny = [
 ]
 
 skip = [
+    # handlebars -> derive_builder uses darling 0.20, diesel uses 0.21
+    { name = "darling", version = "0.20" },
+    { name = "darling_core", version = "0.20" },
+    { name = "darling_macro", version = "0.20" },
+
+    # prettytable-rs -> dirs-next -> redox_users uses thiserror 1.x
+    { name = "thiserror", version = "1" },
+    { name = "thiserror-impl", version = "1" },
 ]
 
 skip-tree = [
     # Build-only dependency uses some stale crates.
     { name = "pest_meta" },
     # We're never running on top of a real WASI platform, so just ignore it.
-    { name = "wasi"},
+    { name = "wasi" },
+    # ring and prettytable-rs pull in older getrandom via redox_users
+    { name = "getrandom", version = "0.2" },
+    # ring uses windows-sys 0.52; socket2 uses 0.60; affects Windows only
+    { name = "windows-sys", version = "0.52" },
+    { name = "windows-sys", version = "0.60" },
 ]
 
