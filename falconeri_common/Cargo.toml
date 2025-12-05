@@ -20,7 +20,7 @@ lazy_static = "1.0.2"
 r2d2 = "0.8.4"
 rand = "0.9"
 regex = "1.0.2"
-reqwest = { version = "0.11.6", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
 semver = "1.0.4"
 serde = "1.0.70"
 serde_json = "1.0"

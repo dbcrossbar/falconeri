@@ -4,31 +4,24 @@
 
 [advisories]
 ignore = [
-    # Ignore a nasty `localtime_r` and `setenv` race condition which can
-    # segfault if we try to read the localtime while someone is setting an env
-    # var.
-    #
-    # This can probably be fixed once
-    # https://github.com/chronotope/chrono/issues/602 has been addressed.
-    #"RUSTSEC-2020-0159",
-    # Also `localtime_r`.
-    "RUSTSEC-2020-0071",
+    # `ansi_term` is unmaintained (dependency of structopt). Should upgrade to clap.
+    "RUSTSEC-2021-0139",
+    # `atty` is unmaintained and has potential unaligned read (dependency of structopt).
+    "RUSTSEC-2021-0145",
+    "RUSTSEC-2024-0375",
+    # `backoff` is unmaintained. Consider switching to `backon`.
+    "RUSTSEC-2025-0012",
+    # `instant` is unmaintained (dependency of backoff).
+    "RUSTSEC-2024-0384",
+    # `proc-macro-error` is unmaintained (dependency of structopt).
+    "RUSTSEC-2024-0370",
 ]
 
 [licenses]
-# Don't allow code with an unclear license.
-unlicensed = "deny"
-
-# Don't allow "copylefted" licenses unless they're listed below.
-copyleft = "deny"
-
 # Allow common non-restrictive licenses. ISC is used for various DNS and crypto
 # things, and it's a minimally restrictive open source license.
-allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "BSD-2-Clause", "CC0-1.0", "ISC", "OpenSSL", "Zlib", "Unicode-DFS-2016"]
-
-# Many organizations ban AGPL-licensed code
-# https://opensource.google/docs/using/agpl-policy/
-deny = ["AGPL-3.0"]
+# Licenses not in this list will be denied (including copyleft and AGPL).
+allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "BSD-2-Clause", "CC0-1.0", "ISC", "OpenSSL", "Zlib", "Unicode-3.0", "Unicode-DFS-2016"]
 
 [[licenses.clarify]]
 # Ring has a messy license.
@@ -55,8 +48,6 @@ skip = [
 ]
 
 skip-tree = [
-    # Rocket's pre-release is stale.
-    { name = "rocket", version = "0.5.0-rc.1" },
     # Build-only dependency uses some stale crates.
     { name = "pest_meta" },
     # We're never running on top of a real WASI platform, so just ignore it.
