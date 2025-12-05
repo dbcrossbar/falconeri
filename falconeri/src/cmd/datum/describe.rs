@@ -17,7 +17,7 @@ struct Params {
 /// Run the `datum describe` subcommand.
 pub async fn run(id: Uuid) -> Result<()> {
     // Look up our data in the database.
-    let pool = db::async_pool(1, ConnectVia::Proxy)?;
+    let pool = db::async_client_pool()?;
     let mut conn = pool.get().await.context("could not get db connection")?;
     let datum = Datum::find(id, &mut conn).await?;
     let input_files = datum.input_files(&mut conn).await?;

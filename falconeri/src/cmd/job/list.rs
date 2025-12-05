@@ -6,7 +6,7 @@ use prettytable::{format::consts::FORMAT_CLEAN, row, Table};
 /// The `job list` subcommand.
 pub async fn run() -> Result<()> {
     // Look up the information to display.
-    let pool = db::async_pool(1, ConnectVia::Proxy)?;
+    let pool = db::async_client_pool()?;
     let mut conn = pool.get().await.context("could not get db connection")?;
     let jobs = Job::list(&mut conn).await?;
 
