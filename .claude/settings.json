@@ -4,6 +4,7 @@
             "Bash(cargo check)",
             "Bash(cargo test)",
             "Bash(cargo test :*)",
+            "Bash(cargo fmt)",
             "Bash(just check)"
         ],
         "deny": [
