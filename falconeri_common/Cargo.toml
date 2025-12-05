@@ -9,16 +9,16 @@ license = "Apache-2.0 OR MIT"
 [dependencies]
 anyhow = { version = "1.0.45", features = ["backtrace"] }
 backoff = "0.4.0"
-base64 = "0.21.2"
+base64 = "0.22"
 cast = { version = "0.3.0", features = ["std"] }
 chrono = { version = "0.4.4", features = ["serde"] }
 diesel = { version = "2.0.4", features = ["chrono", "postgres", "r2d2", "serde_json", "uuid"] }
 diesel_migrations = "2.0.0"
-handlebars = "4.1.4"
+handlebars = "6"
 humantime-serde = "1.0.1"
 lazy_static = "1.0.2"
 r2d2 = "0.8.4"
-rand = "0.8.4"
+rand = "0.9"
 regex = "1.0.2"
 reqwest = { version = "0.11.6", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
 semver = "1.0.4"

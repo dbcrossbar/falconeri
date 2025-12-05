@@ -7,10 +7,10 @@ edition = "2018"
 license = "Apache-2.0 OR MIT"
 
 [dependencies]
-base64 = "0.21.2"
+base64 = "0.22"
 crossbeam = "0.8.1"
 falconeri_common = { path = "../falconeri_common" }
-handlebars = "4.1.4"
+handlebars = "6"
 log = "0.4.3"
 # Needed for ekidd/rust-musl-builder.
 openssl-sys = "*"

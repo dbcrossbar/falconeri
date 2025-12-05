@@ -179,8 +179,8 @@ fn process_datum(
 ///
 /// This function will panic if `child` does not have a `stdout` or `stderr`.
 #[tracing::instrument(skip(to_record), level = "trace")]
-fn tee_child<'a>(
-    scope: &'a Scope,
+fn tee_child(
+    scope: &Scope,
     child: &mut process::Child,
     to_record: Arc<RwLock<dyn Write + Send + Sync>>,
 ) -> Result<()> {
@@ -240,9 +240,7 @@ fn tee_output(
             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
             // An actual error occurred.
             Err(e) => {
-                return Err(e)
-                    .context("error reading from child process")
-                    .map_err(Into::into);
+                return Err(e).context("error reading from child process");
             }
         }
     }

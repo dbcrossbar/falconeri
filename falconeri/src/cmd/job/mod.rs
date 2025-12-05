@@ -59,7 +59,7 @@ pub enum Opt {
 pub fn run(opt: &Opt) -> Result<()> {
     match opt {
         Opt::Describe { job_name } => describe::run(job_name),
-        Opt::List {} => list::run(),
+        Opt::List => list::run(),
         Opt::Retry { job_name } => retry::run(job_name),
         Opt::Run { pipeline_json } => {
             let f =
