@@ -10,9 +10,7 @@
 
 use std::{panic::catch_unwind, process, thread, time::Duration};
 
-use falconeri_common::{
-    chrono, db, kubernetes::get_all_job_names, prelude::*, tracing,
-};
+use falconeri_common::{chrono, db, kubernetes::get_all_job_names, prelude::*};
 
 /// Spawn a thread and run the babysitter in it. This should run indefinitely.
 #[tracing::instrument(level = "trace")]

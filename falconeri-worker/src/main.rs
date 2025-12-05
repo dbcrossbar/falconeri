@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+
 // Needed for static linking to work right on Linux.
 extern crate openssl_sys;
 
@@ -6,7 +8,6 @@ use falconeri_common::{
     prelude::*,
     rest_api::{Client, OutputFilePatch},
     storage::CloudStorage,
-    tracing,
     tracing_support::initialize_tracing,
 };
 use std::{
@@ -25,7 +26,7 @@ const USAGE: &str = "Usage: falconeri-worker <job id>";
 #[tracing::instrument(level = "trace")]
 fn main() -> Result<()> {
     initialize_tracing();
-    openssl_probe::init_ssl_cert_env_vars();
+    falconeri_common::init_openssl_probe();
 
     // Parse our arguments (manually, so we don't need to drag in a ton of
     // libraries).

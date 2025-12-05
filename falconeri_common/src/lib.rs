@@ -1,5 +1,6 @@
 //! Code shared between various Falconeri tools.
 
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 // Silence diesel warnings: https://github.com/diesel-rs/diesel/pull/1787
 #![allow(proc_macro_derive_resolution_fallback)]
@@ -18,7 +19,6 @@ pub use chrono;
 pub use rand;
 pub use semver;
 pub use serde_json;
-pub use tracing;
 
 pub mod connect_via;
 pub mod db;
@@ -70,4 +70,26 @@ pub fn falconeri_common_version() -> semver::Version {
     env!("CARGO_PKG_VERSION")
         .parse::<semver::Version>()
         .expect("could not parse built-in version")
+}
+
+/// Initialize OpenSSL certificate paths by probing the system.
+///
+/// This should be called early in main(), before spawning threads or making
+/// TLS connections. It's a safe wrapper around `openssl_probe::probe()`.
+pub fn init_openssl_probe() {
+    use std::env;
+
+    let result = openssl_probe::probe();
+
+    if let Some(cert_file) = result.cert_file {
+        if env::var_os("SSL_CERT_FILE").is_none() {
+            env::set_var("SSL_CERT_FILE", cert_file);
+        }
+    }
+
+    if let Some(cert_dir) = result.cert_dir {
+        if env::var_os("SSL_CERT_DIR").is_none() {
+            env::set_var("SSL_CERT_DIR", cert_dir);
+        }
+    }
 }

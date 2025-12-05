@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+
 // Needed for static linking to work right on Linux.
 extern crate openssl_sys;
 
@@ -209,7 +211,7 @@ fn patch_output_files(
 #[launch]
 fn rocket() -> _ {
     initialize_tracing();
-    openssl_probe::init_ssl_cert_env_vars();
+    falconeri_common::init_openssl_probe();
 
     if let Err(err) = initialize_server() {
         eprintln!(

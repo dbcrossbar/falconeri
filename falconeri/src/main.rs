@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+
 // Needed for static linking to work right on Linux.
 extern crate openssl_sys;
 
@@ -70,7 +72,7 @@ fn main() {
 
 /// The actual main code of the application.
 fn run() -> Result<()> {
-    openssl_probe::init_ssl_cert_env_vars();
+    falconeri_common::init_openssl_probe();
     let opt = Opt::from_args();
     debug!("Args: {:?}", opt);
 
