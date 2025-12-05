@@ -12,9 +12,9 @@ backoff = { version = "0.4.0", features = ["tokio"] }
 base64 = "0.22"
 cast = { version = "0.3.0", features = ["std"] }
 chrono = { version = "0.4.4", features = ["serde"] }
-diesel = { version = "2.2", features = ["chrono", "postgres", "serde_json", "uuid"] }
-diesel-async = { version = "0.5", features = ["postgres", "deadpool"] }
-diesel_migrations = "2.2"
+diesel = { version = "2.3", features = ["chrono", "postgres", "serde_json", "uuid"] }
+diesel-async = { version = "0.7", features = ["postgres", "deadpool"] }
+diesel_migrations = "2.3"
 futures-util = "0.3"
 handlebars = "6"
 humantime-serde = "1.0.1"

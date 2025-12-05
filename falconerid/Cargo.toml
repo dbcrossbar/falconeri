@@ -9,7 +9,7 @@ license = "Apache-2.0 OR MIT"
 [dependencies]
 axum = { version = "0.8", features = ["macros"] }
 base64 = "0.22"
-diesel-async = { version = "0.5", features = ["postgres", "deadpool"] }
+diesel-async = { version = "0.7", features = ["postgres", "deadpool"] }
 falconeri_common = { path = "../falconeri_common" }
 futures-util = "0.3"
 http = "1"
