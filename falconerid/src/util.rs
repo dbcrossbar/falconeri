@@ -85,12 +85,12 @@ pub struct FalconeridError(pub Error);
 
 impl IntoResponse for FalconeridError {
     fn into_response(self) -> Response {
-        // Log our full error, including the backtrace.
-        error!("{}", self.0.display_causes_without_backtrace());
+        // Log our full error with the error chain using Debug formatting.
+        error!("{:?}", self.0);
 
         // Put the error message in the payload for now. This might become JSON
-        // in the future.
-        let payload = format!("{}", self.0.display_causes_without_backtrace());
+        // in the future. Use Display to avoid leaking backtraces to clients.
+        let payload = format!("{}", self.0);
         (StatusCode::INTERNAL_SERVER_ERROR, payload).into_response()
     }
 }

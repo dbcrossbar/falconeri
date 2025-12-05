@@ -53,10 +53,7 @@ async fn run_babysitter(pool: db::AsyncPool) {
         // We always want to retry all errors. This way, if PostgreSQL is still
         // starting up, or if someone retarted it, we'll eventually recover.
         if let Err(err) = check_running_jobs(&pool).await {
-            error!(
-                "error checking running jobs (will retry later): {}",
-                err.display_causes_and_backtrace()
-            );
+            error!("error checking running jobs (will retry later): {:?}", err);
         }
         tokio::time::sleep(Duration::from_secs(2 * 60)).await;
     }

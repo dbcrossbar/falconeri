@@ -1,8 +1,8 @@
 //! The `deploy` subcommand.
 
 use base64::{prelude::BASE64_STANDARD, Engine};
-use std::iter;
 use clap::Args;
+use std::iter;
 
 use falconeri_common::{
     kubernetes,

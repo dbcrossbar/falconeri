@@ -1,7 +1,7 @@
 //! The `datum` subcommand.
 
-use falconeri_common::prelude::*;
 use clap::Subcommand;
+use falconeri_common::prelude::*;
 
 mod describe;
 

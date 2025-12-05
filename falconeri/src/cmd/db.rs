@@ -1,8 +1,8 @@
 //! `db` subcommand for interaction with the database.
 
+use clap::Subcommand;
 use falconeri_common::{db, prelude::*};
 use std::process;
-use clap::Subcommand;
 
 /// Commands for interacting with the database.
 #[derive(Debug, Subcommand)]

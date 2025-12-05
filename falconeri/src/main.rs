@@ -3,10 +3,8 @@
 // Needed for static linking to work right on Linux.
 extern crate openssl_sys;
 
-use std::{io::stderr, process};
-
-use falconeri_common::prelude::*;
 use clap::Parser;
+use falconeri_common::prelude::*;
 
 mod cmd;
 mod description;
@@ -60,19 +58,8 @@ enum Opt {
     },
 }
 
-/// Wrapper around `run` which reports errors.
 #[tokio::main]
-async fn main() {
-    if let Err(err) = run().await {
-        let stderr = stderr();
-        write!(&mut stderr.lock(), "{}", err.display_causes_and_backtrace())
-            .expect("Error occurred while trying to display error");
-        process::exit(1);
-    }
-}
-
-/// The actual main code of the application.
-async fn run() -> Result<()> {
+async fn main() -> Result<()> {
     falconeri_common::init_openssl_probe();
     let opt = Opt::parse();
     debug!("Args: {:?}", opt);

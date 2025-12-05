@@ -21,7 +21,7 @@ use falconeri_common::{
     tracing_support::initialize_tracing,
 };
 use serde::Deserialize;
-use std::{env, process::exit};
+use std::env;
 
 mod babysitter;
 pub(crate) mod inputs;
@@ -221,14 +221,9 @@ async fn patch_output_files(
 async fn main() -> Result<()> {
     initialize_tracing();
     falconeri_common::init_openssl_probe();
-
-    if let Err(err) = initialize_server().await {
-        eprintln!(
-            "Failed to initialize server:\n{}",
-            err.display_causes_and_backtrace()
-        );
-        exit(1);
-    }
+    initialize_server()
+        .await
+        .context("Failed to initialize server")?;
 
     // Set up application state. Use 2x CPU count for pool size to match
     // Rocket's default worker count, which was tested under heavy load.

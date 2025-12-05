@@ -75,13 +75,8 @@ async fn main() -> Result<()> {
             match result {
                 Ok(()) => client.mark_datum_as_done(&mut datum, output_str).await?,
                 Err(err) => {
-                    error!(
-                        "failed to process datum {}: {}",
-                        datum.id,
-                        err.display_causes_and_backtrace(),
-                    );
-                    let error_message =
-                        format!("{}", err.display_causes_without_backtrace());
+                    error!("failed to process datum {}: {:?}", datum.id, err);
+                    let error_message = format!("{:?}", err);
                     let backtrace = format!("{}", err.backtrace());
                     client
                         .mark_datum_as_error(
