@@ -1,7 +1,7 @@
 //! The `deploy` subcommand.
 
-use base64::{prelude::BASE64_STANDARD, Engine};
 use clap::Args;
+use falconeri_common::base64::{prelude::BASE64_STANDARD, Engine};
 use std::iter;
 
 use falconeri_common::{

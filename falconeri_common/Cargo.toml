@@ -1,10 +1,9 @@
 [package]
 name = "falconeri_common"
-version = "2.0.0-alpha.0"
-authors = ["Eric Kidd <git@randomhacks.net>"]
-edition = "2018"
-
-license = "Apache-2.0 OR MIT"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
 anyhow = { version = "1.0.45", features = ["backtrace"] }
@@ -24,10 +23,10 @@ rand = "0.9"
 regex = "1.0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 semver = "1.0.4"
-serde = "1.0.70"
+serde.workspace = true
 serde_json = "1.0"
-tokio = { version = "1", features = ["process", "io-util"] }
-tracing = "0.1.29"
+tokio = { workspace = true, features = ["process", "io-util"] }
+tracing.workspace = true
 tracing-subscriber = { version = "0.3.2", features = ["env-filter"] }
 url = "2.2.2"
 uuid = { version = "1.3.3", features = ["serde", "v4"] }

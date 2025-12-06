@@ -14,11 +14,19 @@
 pub extern crate diesel;
 pub extern crate diesel_migrations;
 
+pub use base64;
 pub use cast;
 pub use chrono;
+pub use diesel_async;
+pub use futures_util;
+pub use handlebars;
 pub use rand;
 pub use semver;
+pub use serde;
 pub use serde_json;
+pub use tokio;
+pub use tracing;
+pub use uuid;
 
 pub mod connect_via;
 pub mod db;

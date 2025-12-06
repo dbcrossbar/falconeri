@@ -1,25 +1,17 @@
 [package]
 name = "falconerid"
-version = "2.0.0-alpha.0"
-authors = ["Eric Kidd <git@randomhacks.net>"]
-edition = "2018"
-
-license = "Apache-2.0 OR MIT"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
 axum = { version = "0.8", features = ["macros"] }
-base64 = "0.22"
-diesel-async = { version = "0.7", features = ["postgres", "deadpool"] }
 falconeri_common = { path = "../falconeri_common" }
-futures-util = "0.3"
 http = "1"
-serde = "1.0"
-serde_derive = "1.0"
-serde_json = "1.0"
+serde.workspace = true
 serde_yaml = "0.9"
-tokio = { version = "1", features = ["full"] }
+tokio = { workspace = true, features = ["full"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "limit"] }
-tracing = "0.1.29"
-
-
+tracing.workspace = true

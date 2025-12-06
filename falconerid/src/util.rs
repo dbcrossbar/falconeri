@@ -5,7 +5,7 @@ use axum::{
     http::{request::Parts, StatusCode},
     response::{IntoResponse, Response},
 };
-use base64::{prelude::BASE64_STANDARD, Engine};
+use falconeri_common::base64::{prelude::BASE64_STANDARD, Engine};
 use falconeri_common::{db, prelude::*};
 use std::result;
 

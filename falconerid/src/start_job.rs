@@ -1,11 +1,11 @@
 // ! Code for starting a job on the server.
 
-use diesel_async::scoped_futures::ScopedFutureExt;
-use diesel_async::AsyncConnection;
+use falconeri_common::diesel_async::scoped_futures::ScopedFutureExt;
+use falconeri_common::diesel_async::AsyncConnection;
+use falconeri_common::serde_json::{self, json};
 use falconeri_common::{
     cast, kubernetes, manifest::render_manifest, pipeline::*, prelude::*,
 };
-use serde_json::{self, json};
 use std::cmp::min;
 
 use crate::inputs::input_to_datums;
@@ -201,7 +201,7 @@ pub async fn start_batch_job(pipeline_spec: &PipelineSpec, job: &Job) -> Result<
 
 #[test]
 fn render_template() {
-    use serde_json;
+    use falconeri_common::serde_json;
     use serde_yaml;
 
     let json = include_str!("../../falconeri_common/src/example_pipeline_spec.json");

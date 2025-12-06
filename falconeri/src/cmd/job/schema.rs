@@ -1,7 +1,7 @@
 //! The `job schema` subcommand.
 
 use falconeri_common::prelude::*;
-use serde_json;
+use falconeri_common::serde_json;
 use std::io::stdout;
 
 use crate::pipeline::PipelineSpec;

@@ -1,15 +1,12 @@
 [package]
 name = "falconeri-worker"
-version = "2.0.0-alpha.0"
-authors = ["Eric Kidd <git@randomhacks.net>"]
-edition = "2018"
-
-license = "Apache-2.0 OR MIT"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
 falconeri_common = { path = "../falconeri_common" }
 glob = "0.3"
-log = "0.4.3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "time"] }
-tracing = "0.1.29"
-uuid = { version = "1.3.3", features = ["serde", "v4"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "io-util", "time"] }
+tracing.workspace = true

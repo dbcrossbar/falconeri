@@ -6,7 +6,9 @@ use axum::{
     routing::{get, patch, post},
     Json, Router,
 };
-use diesel_async::{scoped_futures::ScopedFutureExt, AsyncConnection};
+use falconeri_common::diesel_async::{
+    scoped_futures::ScopedFutureExt, AsyncConnection,
+};
 use tower_http::limit::RequestBodyLimitLayer;
 
 use falconeri_common::{
