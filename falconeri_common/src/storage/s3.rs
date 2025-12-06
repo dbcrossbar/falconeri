@@ -8,7 +8,10 @@ use std::{fs, process::Stdio};
 use tokio::process::Command;
 
 use super::CloudStorage;
-use crate::kubernetes::{base64_encoded_secret_string, kubectl_secret};
+use crate::kubernetes::{
+    base64_encoded_optional_secret_string, base64_encoded_secret_string,
+    kubectl_secret,
+};
 use crate::prelude::*;
 use crate::secret::Secret;
 
@@ -23,6 +26,9 @@ struct S3SecretData {
     /// Our `AWS_SECRET_ACCESS_KEY` value.
     #[serde(with = "base64_encoded_secret_string")]
     aws_secret_access_key: String,
+    /// Optional custom endpoint URL for S3-compatible services like MinIO.
+    #[serde(default, with = "base64_encoded_optional_secret_string")]
+    aws_endpoint_url: Option<String>,
 }
 
 /// Backend for talking to AWS S3, currently based on `awscli`.
@@ -63,6 +69,10 @@ impl S3Storage {
         if let Some(secret_data) = &self.secret_data {
             command.env("AWS_ACCESS_KEY_ID", &secret_data.aws_access_key_id);
             command.env("AWS_SECRET_ACCESS_KEY", &secret_data.aws_secret_access_key);
+            // Support custom S3-compatible endpoints (e.g., MinIO).
+            if let Some(endpoint_url) = &secret_data.aws_endpoint_url {
+                command.args(["--endpoint-url", endpoint_url]);
+            }
         }
         command
     }

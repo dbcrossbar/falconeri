@@ -1,40 +1,40 @@
-# This `justfile` should allow you to run a debug build of `falconeri`
-# on a minikube cluster.
+# This `justfile` should allow you to run a debug build of `falconeri` on a
+# local k8s cluster. See the guide for instructions on how to set up a local
+# cluster (on Mac or Linux), and how to point your `kubectl` at it.
 #
 # You can find the input data in `texts`.
-
-# Start a local copy of minikube.
-minikube-linux:
-    minikube start
-    @echo "Now run `eval $(minikube docker-env)`"
 
 # Build our image.
 image:
     cp ../../target/x86_64-unknown-linux-musl/debug/falconeri-worker .
     docker build -t word-frequencies .
 
-# Create a secret using credentials from a vault server, if you have one.
-secret:
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    # Fetch creds.
-    vault read -format=json aws/creds/falconeri-test > creds.json
-    cat creds.json | jq -jr '.data.access_key' > AWS_ACCESS_KEY_ID
-    cat creds.json | jq -jr '.data.secret_key' > AWS_SECRET_ACCESS_KEY
-    rm creds.json
-
-    # Create secret.
-    kubectl delete secret/s3 || true
-    kubectl create secret generic s3 \
-        --from-file=AWS_ACCESS_KEY_ID \
-        --from-file=AWS_SECRET_ACCESS_KEY
-    rm AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-
 # Set up a proxy.
 proxy:
     cargo run -p falconeri -- proxy
 
+
+# Set up MinIO CLI alias (requires proxy running).
+mc-alias:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    MINIO_PASS=$(kubectl get secret falconeri-minio -o jsonpath='{.data.MINIO_ROOT_PASSWORD}' | base64 -d)
+    mc alias set local http://localhost:9000 minioadmin "$MINIO_PASS"
+
+# Upload test texts to MinIO (requires proxy running and mc-alias).
+upload:
+    mc mb --ignore-existing local/falconeri-test
+    mc cp texts/*.txt local/falconeri-test/texts/
+
 # Run our example job.
 run:
     cargo run -p falconeri -- job run word-frequencies.json
+
+# Print results from MinIO (requires proxy running and mc-alias).
+# Output filename mirrors input: texts/foo.txt -> word-frequencies/foo.txt
+results:
+    mc cat local/falconeri-test/word-frequencies/buffalo-public-library-1883.txt | head -20
+
+# Delete results from MinIO (to verify fresh output on re-runs).
+delete-results:
+    mc rm --recursive --force local/falconeri-test/word-frequencies/

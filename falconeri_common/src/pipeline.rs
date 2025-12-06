@@ -207,6 +207,7 @@ fn parse_pipeline_spec() {
             name: "s3".to_owned(),
             key: "AWS_ACCESS_KEY_ID".to_owned(),
             env_var: "AWS_ACCESS_KEY_ID".to_owned(),
+            optional: false,
         },
     );
     assert_eq!(

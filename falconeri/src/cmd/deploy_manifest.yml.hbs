@@ -84,6 +84,94 @@ spec:
   ports:
   - port: 5432
 
+{{#if config.enable_minio}}
+{{#if all}}
+---
+# MinIO volume: Stores object data.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: falconeri-minio
+spec:
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Filesystem
+  resources:
+    requests:
+      storage: "{{config.minio_storage}}"
+{{#if config.storage_class_name}}
+  storageClassName: {{config.storage_class_name}}
+{{/if}}
+{{/if}}
+
+---
+# MinIO deployment: S3-compatible object storage for local development.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: falconeri-minio
+  labels:
+    app: falconeri-minio
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: falconeri-minio
+  template:
+    metadata:
+      labels:
+        app: falconeri-minio
+    spec:
+      containers:
+      - name: minio
+        image: minio/minio:latest
+        args: ["server", "/data", "--console-address", ":9001"]
+        resources:
+          requests:
+            cpu: "{{config.minio_cpu}}"
+            memory: "{{config.minio_memory}}"
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        env:
+        - name: MINIO_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              name: falconeri-minio
+              key: MINIO_ROOT_USER
+        - name: MINIO_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: falconeri-minio
+              key: MINIO_ROOT_PASSWORD
+        ports:
+        - containerPort: 9000
+          name: api
+        - containerPort: 9001
+          name: console
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: falconeri-minio
+
+---
+# MinIO service: Provides DNS lookup for MinIO.
+kind: Service
+apiVersion: v1
+metadata:
+  name: falconeri-minio
+spec:
+  selector:
+    app: falconeri-minio
+  ports:
+  - name: api
+    port: 9000
+  - name: console
+    port: 9001
+{{/if}}
+
 ---
 # falconerid deployment: Keeps some falconerid servers running.
 apiVersion: apps/v1

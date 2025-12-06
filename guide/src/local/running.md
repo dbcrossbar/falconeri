@@ -65,3 +65,70 @@ You should see the falconeri deployment, service, and pods running.
 | `cargo run -p falconeri -- proxy` | Create proxy connection |
 | `cargo run -p falconeri -- migrate` | Run database migrations |
 | `kubectl get all` | Check cluster status |
+
+## Running the Word-Frequencies Example
+
+The `examples/word-frequencies/` directory contains a complete example pipeline that processes text files and outputs word frequency counts.
+
+### Prerequisites
+
+- Falconeri deployed with `--development` (includes MinIO)
+- Proxy running in another terminal
+- MinIO client (`mc`) installed (see [macOS](./mac.md) or [Linux](./linux.md) setup)
+
+### Building the Example Image
+
+From the `examples/word-frequencies/` directory:
+
+```sh
+just image
+```
+
+### Setting Up MinIO
+
+Configure the MinIO CLI with credentials from the cluster:
+
+```sh
+just mc-alias
+```
+
+Upload test data to MinIO:
+
+```sh
+just upload
+```
+
+### Running the Job
+
+```sh
+just run
+```
+
+### Viewing Results
+
+```sh
+just results
+```
+
+This shows the top 20 word frequencies from the processed text.
+
+### Re-running Tests
+
+To verify you're seeing fresh output (not stale results), delete the previous results first:
+
+```sh
+just delete-results
+just run
+just results
+```
+
+### Word-Frequencies Commands
+
+| Command | Description |
+|---------|-------------|
+| `just image` | Build the word-frequencies Docker image |
+| `just mc-alias` | Configure MinIO CLI credentials |
+| `just upload` | Create bucket and upload test texts |
+| `just run` | Submit the word-frequencies job |
+| `just results` | Display word frequency output |
+| `just delete-results` | Delete results (for clean re-runs) |

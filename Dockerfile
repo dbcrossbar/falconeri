@@ -1,10 +1,11 @@
-# Use Alpine as a base image, because it's small. We need `edge` to get
-# `aws-cli`.
-FROM alpine:3.14
+# Use Alpine as a base image, because it's small.
+# Alpine 3.21 is current stable LTS (released Nov 2025).
+FROM alpine:3.21
 
 # Install `gsutil`. Taken from
 # https://github.com/GoogleCloudPlatform/cloud-sdk-docker/blob/master/alpine/Dockerfile.
-ARG CLOUD_SDK_VERSION=364.0.0
+# Note: gcloud SDK version 508.0.0 is current as of Dec 2025.
+ARG CLOUD_SDK_VERSION=508.0.0
 ENV CLOUD_SDK_VERSION=$CLOUD_SDK_VERSION
 ENV PATH=/google-cloud-sdk/bin:$PATH
 RUN apk --no-cache --update add \
@@ -27,13 +28,13 @@ RUN apk --no-cache --update add \
 VOLUME ["/root/.config"]
 
 # Install `awscli`.
-RUN echo http://dl-cdn.alpinelinux.org/alpine/edge/testing/ >> /etc/apk/repositories && \
-    apk --no-cache --update add aws-cli
+RUN apk --no-cache --update add aws-cli
 
 # Install `kubectl`.
-ARG KUBERNETES_VERSION=1.13.4
+# kubectl 1.31.x is current stable as of Dec 2025.
+ARG KUBERNETES_VERSION=1.31.14
 ENV KUBERNETES_VERSION=$KUBERNETES_VERSION
-ADD https://storage.googleapis.com/kubernetes-release/release/v${KUBERNETES_VERSION}/bin/linux/amd64/kubectl /usr/local/bin/kubectl
+ADD https://dl.k8s.io/release/v${KUBERNETES_VERSION}/bin/linux/amd64/kubectl /usr/local/bin/kubectl
 RUN chmod +x /usr/local/bin/kubectl
 
 # Run our webserver out of /app.

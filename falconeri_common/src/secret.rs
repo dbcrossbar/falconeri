@@ -27,5 +27,9 @@ pub enum Secret {
         key: String,
         /// The environment variable name into which to place the value.
         env_var: String,
+        /// If true, the secret key is optional and the pod will start even if
+        /// the key doesn't exist in the secret.
+        #[serde(default)]
+        optional: bool,
     },
 }

@@ -20,7 +20,20 @@ const DEPLOY_MANIFEST: &str = include_str!("deploy_manifest.yml.hbs");
 /// Parameters used to generate a secret manifest.
 #[derive(Serialize)]
 struct SecretManifestParams {
+    /// Include the main falconeri secret (postgres password).
+    include_falconeri: bool,
+    /// The base64-encoded postgres password.
     postgres_password: String,
+    /// Include the MinIO server secret.
+    include_minio: bool,
+    /// Include the S3 client secret for workers.
+    include_s3: bool,
+    /// The base64-encoded MinIO root user (also used as AWS_ACCESS_KEY_ID).
+    minio_root_user: String,
+    /// The base64-encoded MinIO root password (also used as AWS_SECRET_ACCESS_KEY).
+    minio_root_password: String,
+    /// The MinIO endpoint URL for the s3 secret.
+    minio_endpoint_url: String,
 }
 
 /// Per-environment configuration.
@@ -54,6 +67,14 @@ struct Config {
     use_local_image: bool,
     /// The version of `falconeri`.
     version: String,
+    /// Whether to deploy MinIO for local S3-compatible storage.
+    enable_minio: bool,
+    /// The amount of disk to allocate for MinIO.
+    minio_storage: String,
+    /// The amount of RAM to request for MinIO.
+    minio_memory: String,
+    /// The number of CPUs to request for MinIO.
+    minio_cpu: String,
 }
 
 /// Parameters used to generate a deploy manifest.
@@ -71,11 +92,11 @@ pub struct Opt {
     #[arg(long = "dry-run")]
     dry_run: bool,
 
-    /// Don't include a secret in the manifest.
-    #[arg(long = "skip-secret")]
-    skip_secret: bool,
+    /// Don't include secrets in the manifest.
+    #[arg(long = "skip-secrets", visible_alias = "skip-secret")]
+    skip_secrets: bool,
 
-    /// Deploy a development server (for minikube).
+    /// Deploy a development server (for minikube/colima).
     #[arg(long = "development")]
     development: bool,
 
@@ -117,22 +138,37 @@ pub struct Opt {
     /// as `RUST_LOG`. Example: `falconeri_common=debug,falconerid=debug,warn`.
     #[arg(long = "falconerid-log-level")]
     falconerid_log_level: Option<String>,
+
+    /// Deploy MinIO for local S3-compatible storage. Defaults to true for
+    /// --development, false otherwise.
+    #[arg(long = "with-minio")]
+    with_minio: Option<bool>,
+
+    /// The amount of disk to allocate for MinIO.
+    #[arg(long = "minio-storage")]
+    minio_storage: Option<String>,
+
+    /// The amount of RAM to request for MinIO.
+    #[arg(long = "minio-memory")]
+    minio_memory: Option<String>,
+
+    /// The number of CPUs to request for MinIO.
+    #[arg(long = "minio-cpu")]
+    minio_cpu: Option<String>,
 }
 
 /// Deploy `falconeri` to the current Kubernetes cluster.
 pub async fn run(opt: &Opt) -> Result<()> {
-    // Generate a password using the system's "secure" random number generator.
+    // Generate passwords using the system's "secure" random number generator.
     let mut rng = StdRng::from_os_rng();
-    let postgres_password = iter::repeat(())
+    let postgres_password: Vec<u8> = iter::repeat(())
         .map(|()| rng.sample(Alphanumeric))
         .take(32)
-        .collect::<Vec<u8>>();
-
-    // Generate our secret manifest.
-    let secret_params = SecretManifestParams {
-        postgres_password: BASE64_STANDARD.encode(&postgres_password[..]),
-    };
-    let secret_manifest = render_manifest(SECRET_MANIFEST, &secret_params)?;
+        .collect();
+    let minio_root_password: Vec<u8> = iter::repeat(())
+        .map(|()| rng.sample(Alphanumeric))
+        .take(32)
+        .collect();
 
     // Figure out our configuration.
     let mut config = default_config(opt.development);
@@ -161,16 +197,49 @@ pub async fn run(opt: &Opt) -> Result<()> {
     if let Some(falconerid_log_level) = &opt.falconerid_log_level {
         config.falconerid_log_level = falconerid_log_level.to_owned();
     }
+    // Handle --with-minio flag (defaults based on development mode).
+    if let Some(with_minio) = opt.with_minio {
+        config.enable_minio = with_minio;
+    }
+    if let Some(minio_storage) = &opt.minio_storage {
+        config.minio_storage = minio_storage.to_owned();
+    }
+    if let Some(minio_memory) = &opt.minio_memory {
+        config.minio_memory = minio_memory.to_owned();
+    }
+    if let Some(minio_cpu) = &opt.minio_cpu {
+        config.minio_cpu = minio_cpu.to_owned();
+    }
+
+    // Check which secrets need to be created (only if they don't already exist).
+    let include_falconeri =
+        !opt.skip_secrets && !kubernetes::resource_exists("secret/falconeri").await?;
+    let include_minio = config.enable_minio
+        && !opt.skip_secrets
+        && !kubernetes::resource_exists("secret/falconeri-minio").await?;
+    let include_s3 = config.enable_minio
+        && !opt.skip_secrets
+        && !kubernetes::resource_exists("secret/s3").await?;
+
+    // Generate our secret manifest.
+    let secret_params = SecretManifestParams {
+        include_falconeri,
+        postgres_password: BASE64_STANDARD.encode(&postgres_password[..]),
+        include_minio,
+        include_s3,
+        minio_root_user: BASE64_STANDARD.encode("minioadmin"),
+        minio_root_password: BASE64_STANDARD.encode(&minio_root_password[..]),
+        minio_endpoint_url: "http://falconeri-minio:9000".to_string(),
+    };
+    let secret_manifest = render_manifest(SECRET_MANIFEST, &secret_params)?;
 
     // Generate our deploy manifest.
     let deploy_params = DeployManifestParams { all: true, config };
     let deploy_manifest = render_manifest(DEPLOY_MANIFEST, &deploy_params)?;
 
-    // Combine our manifests, only including the secret if we need it.
+    // Combine our manifests.
     let mut manifest = String::new();
-    if !opt.skip_secret && !kubernetes::resource_exists("secret/falconeri").await? {
-        manifest.push_str(&secret_manifest);
-    }
+    manifest.push_str(&secret_manifest);
     manifest.push_str(&deploy_manifest);
 
     if opt.dry_run {
@@ -184,19 +253,20 @@ pub async fn run(opt: &Opt) -> Result<()> {
 
 /// Undeploy `falconeri`, removing it from the cluster.
 pub async fn run_undeploy(all: bool) -> Result<()> {
-    // Clean up things declared by our regular manifest.
+    // Clean up things declared by our regular manifest. Use development config
+    // to ensure MinIO resources are included in the manifest for deletion.
     let params = DeployManifestParams {
         all,
-        // We can always use the production config, because we don't
-        // care about the details of the resources we're deleting.
-        config: default_config(false),
+        config: default_config(true),
     };
     let manifest = render_manifest(DEPLOY_MANIFEST, &params)?;
     kubernetes::undeploy(&manifest).await?;
 
-    // Clean up our secrets manually instead of rending a new manifest.
+    // Clean up our secrets manually instead of rendering a new manifest.
     if all {
         kubernetes::delete("secret/falconeri").await?;
+        kubernetes::delete("secret/falconeri-minio").await?;
+        kubernetes::delete("secret/s3").await?;
     }
 
     Ok(())
@@ -216,13 +286,18 @@ fn default_config(development: bool) -> Config {
             postgres_memory: "256Mi".to_string(),
             postgres_cpu: "100m".to_string(),
             falconerid_replicas: 1,
-            falconerid_memory: "64Mi".to_string(),
+            // 256Mi needed for Python-based aws-cli in Alpine 3.21+
+            falconerid_memory: "256Mi".to_string(),
             falconerid_cpu: "100m".to_string(),
             falconerid_log_level: "falconeri_common=debug,falconerid=debug,warn"
                 .to_string(),
             falconerid_pool_size: 4,
             use_local_image: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            enable_minio: true,
+            minio_storage: "256Mi".to_string(),
+            minio_memory: "256Mi".to_string(),
+            minio_cpu: "100m".to_string(),
         }
     } else {
         Config {
@@ -239,6 +314,10 @@ fn default_config(development: bool) -> Config {
             falconerid_pool_size: 32,
             use_local_image: false,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            enable_minio: false,
+            minio_storage: "10Gi".to_string(),
+            minio_memory: "512Mi".to_string(),
+            minio_cpu: "250m".to_string(),
         }
     }
 }

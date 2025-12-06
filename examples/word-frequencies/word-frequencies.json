@@ -21,6 +21,12 @@
                 "name": "s3",
                 "key": "AWS_SECRET_ACCESS_KEY",
                 "env_var": "AWS_SECRET_ACCESS_KEY"
+            },
+            {
+                "name": "s3",
+                "key": "AWS_ENDPOINT_URL",
+                "env_var": "AWS_ENDPOINT_URL",
+                "optional": true
             }
         ]
     },
@@ -35,11 +41,11 @@
     "input": {
         "atom": {
           "repo": "texts",
-          "URI": "s3://fdy-falconeri-test/texts/",
+          "URI": "s3://falconeri-test/texts/",
           "glob": "/*"
         }
     },
     "egress": {
-        "URI": "s3://fdy-falconeri-test/word-frequencies/"
+        "URI": "s3://falconeri-test/word-frequencies/"
     }
 }

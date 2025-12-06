@@ -26,6 +26,17 @@ sudo apt-get install postgresql-client
 sudo dnf install postgresql
 ```
 
+### MinIO Client
+
+For interacting with MinIO storage in development mode:
+
+```sh
+curl https://dl.min.io/client/mc/release/linux-amd64/mc -o ~/.local/bin/mc
+chmod +x ~/.local/bin/mc
+```
+
+Make sure `~/.local/bin` is in your PATH.
+
 ### Docker
 
 Install Docker following the [official instructions](https://docs.docker.com/engine/install/) for your distribution.

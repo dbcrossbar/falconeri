@@ -34,6 +34,14 @@ Alternatively, you can install the full PostgreSQL package:
 brew install postgresql
 ```
 
+### MinIO Client
+
+For interacting with MinIO storage in development mode:
+
+```sh
+brew install minio/stable/mc
+```
+
 ### Colima
 
 ```sh

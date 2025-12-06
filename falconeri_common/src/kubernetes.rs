@@ -109,6 +109,39 @@ pub mod base64_encoded_secret_string {
     }
 }
 
+/// Custom `serde` (de)serialization module for optional Base64-encoded strings.
+/// Use with `#[serde(default, with = "base64_encoded_optional_secret_string")]`
+/// to automatically decode optional Base64-encoded fields.
+pub mod base64_encoded_optional_secret_string {
+    use base64::{prelude::BASE64_STANDARD, Engine};
+    use serde::de::{Deserializer, Error as DeError};
+    use std::result;
+
+    /// Deserialize an optional secret represented as a Base64-encoded UTF-8 string.
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> result::Result<Option<String>, D::Error> {
+        // Use Option::deserialize to handle missing fields
+        let maybe_encoded: Option<String> =
+            serde::de::Deserialize::deserialize(deserializer)?;
+        match maybe_encoded {
+            None => Ok(None),
+            Some(encoded) => {
+                let bytes = BASE64_STANDARD.decode(&encoded[..]).map_err(|err| {
+                    D::Error::custom(format!(
+                        "could not base64-decode secret: {}",
+                        err
+                    ))
+                })?;
+                let decoded = String::from_utf8(bytes).map_err(|err| {
+                    D::Error::custom(format!("could not UTF-8-decode secret: {}", err))
+                })?;
+                Ok(Some(decoded))
+            }
+        }
+    }
+}
+
 /// Fetch a secret and deserialize it as the specified type.
 #[instrument(level = "trace")]
 pub async fn kubectl_secret<T: DeserializeOwned>(secret: &str) -> Result<T> {

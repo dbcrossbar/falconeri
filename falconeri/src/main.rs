@@ -28,7 +28,7 @@ enum Opt {
     #[command(name = "deploy")]
     Deploy {
         #[command(flatten)]
-        cmd: cmd::deploy::Opt,
+        cmd: Box<cmd::deploy::Opt>,
     },
 
     /// Job-related commands.
