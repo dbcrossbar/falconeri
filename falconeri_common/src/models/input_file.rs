@@ -24,11 +24,15 @@ pub struct InputFile {
 impl InputFile {
     /// Fetch all the input files corresponding to `datums`, returning grouped
     /// in the same order.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, level = "trace")]
     pub async fn for_datums(
         datums: &[Datum],
         conn: &mut AsyncPgConnection,
     ) -> Result<Vec<Vec<InputFile>>> {
+        trace!(
+            datum_count = datums.len(),
+            "fetching input files for datums"
+        );
         Ok(InputFile::belonging_to(datums)
             .load(conn)
             .await
@@ -66,11 +70,15 @@ pub struct NewInputFile {
 
 impl NewInputFile {
     /// Insert a new job into the database.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, level = "trace")]
     pub async fn insert_all(
         input_files: &[Self],
         conn: &mut AsyncPgConnection,
     ) -> Result<()> {
+        trace!(
+            input_file_count = input_files.len(),
+            "inserting input files"
+        );
         diesel::insert_into(input_files::table)
             .values(input_files)
             .execute(conn)

@@ -12,7 +12,7 @@ use tokio::process::Command;
 use crate::prelude::*;
 
 /// Run `kubectl`, passing any output through to the console.
-#[tracing::instrument(level = "trace")]
+#[instrument(level = "trace")]
 pub async fn kubectl(args: &[&str]) -> Result<()> {
     let status = Command::new("kubectl")
         .args(args)
@@ -27,7 +27,7 @@ pub async fn kubectl(args: &[&str]) -> Result<()> {
 
 /// Run `kubectl`, capture output as JSON, and parse it using the
 /// specified type.
-#[tracing::instrument(level = "trace")]
+#[instrument(level = "trace")]
 pub async fn kubectl_parse_json<T: DeserializeOwned>(args: &[&str]) -> Result<T> {
     let output = Command::new("kubectl")
         .args(args)
@@ -44,7 +44,7 @@ pub async fn kubectl_parse_json<T: DeserializeOwned>(args: &[&str]) -> Result<T>
 }
 
 /// Run `kubectl` with the specified input.
-#[tracing::instrument(level = "trace")]
+#[instrument(skip(input), level = "trace")]
 pub async fn kubectl_with_input(args: &[&str], input: &str) -> Result<()> {
     let mut child = Command::new("kubectl")
         .args(args)
@@ -68,7 +68,7 @@ pub async fn kubectl_with_input(args: &[&str], input: &str) -> Result<()> {
 }
 
 /// Does `kubectl` exit successfully when called with the specified arguments?
-#[tracing::instrument(level = "trace")]
+#[instrument(level = "trace")]
 pub async fn kubectl_succeeds(args: &[&str]) -> Result<bool> {
     let output = Command::new("kubectl").args(args).output().await?;
     Ok(output.status.success())
@@ -110,7 +110,7 @@ pub mod base64_encoded_secret_string {
 }
 
 /// Fetch a secret and deserialize it as the specified type.
-#[tracing::instrument(level = "trace")]
+#[instrument(level = "trace")]
 pub async fn kubectl_secret<T: DeserializeOwned>(secret: &str) -> Result<T> {
     let secret: Secret<T> =
         kubectl_parse_json(&["get", "secret", secret, "-o", "json"]).await?;
@@ -166,7 +166,7 @@ struct StatusJson {
 }
 
 /// Get a set of currently running pod names.
-#[tracing::instrument(level = "trace")]
+#[instrument(level = "trace")]
 pub async fn get_running_pod_names() -> Result<HashSet<String>> {
     let pods = kubectl_parse_json::<ItemsJson<ResourceJson>>(&[
         "get",
@@ -200,7 +200,7 @@ pub async fn get_running_pod_names() -> Result<HashSet<String>> {
 }
 
 /// Get a set of all job names present on the cluster.
-#[tracing::instrument(level = "trace")]
+#[instrument(level = "trace")]
 pub async fn get_all_job_names() -> Result<HashSet<String>> {
     let jobs = kubectl_parse_json::<ItemsJson<ResourceJson>>(&[
         "get",

@@ -31,7 +31,7 @@ pub struct Job {
 
 impl Job {
     /// Find a job by ID.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(job = %id), level = "trace")]
     pub async fn find(id: Uuid, conn: &mut AsyncPgConnection) -> Result<Job> {
         jobs::table
             .find(id)
@@ -41,7 +41,7 @@ impl Job {
     }
 
     /// Find a job by job name.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(job_name = %job_name), level = "trace")]
     pub async fn find_by_job_name(
         job_name: &str,
         conn: &mut AsyncPgConnection,
@@ -54,7 +54,7 @@ impl Job {
     }
 
     /// Find all jobs with specified status.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(status = %status), level = "trace")]
     pub async fn find_by_status(
         status: Status,
         conn: &mut AsyncPgConnection,
@@ -67,7 +67,7 @@ impl Job {
     }
 
     /// Get all known jobs.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, level = "trace")]
     pub async fn list(conn: &mut AsyncPgConnection) -> Result<Vec<Job>> {
         jobs::table
             .order_by(jobs::created_at.desc())
@@ -78,7 +78,7 @@ impl Job {
 
     /// Look up the next datum available to process, and set the status to
     /// `"processing"`. This is intended to be atomic from an SQL perspective.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(job = %self.id, node_name = %node_name, pod_name = %pod_name), level = "trace")]
     pub async fn reserve_next_datum(
         &self,
         node_name: &str,
@@ -119,7 +119,7 @@ impl Job {
     ///
     /// But if the reservation has been made at the database layer, we can make
     /// the reservation idempotent by looking for an existing reservation.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(job = %self.id, pod_name = %pod_name), level = "trace")]
     async fn find_already_reserved_datum(
         &self,
         pod_name: &str,
@@ -139,7 +139,7 @@ impl Job {
 
     /// Internal helper for `reserve_next_datum` which performs the actual
     /// atomic reservation part itself, if we actually need to do so.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(job = %self.id, node_name = %node_name, pod_name = %pod_name), level = "trace")]
     async fn actually_reserve_next_datum(
         &self,
         node_name: &str,
@@ -190,7 +190,7 @@ impl Job {
     }
 
     /// Get the number of datums with each status.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(job = %self.id), level = "trace")]
     pub async fn datum_status_counts(
         &self,
         conn: &mut AsyncPgConnection,
@@ -202,7 +202,7 @@ impl Job {
     ///
     /// This static method variant is useful inside async transactions where
     /// we can't easily call methods on `&self`.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(job = %job_id), level = "trace")]
     pub async fn datum_status_counts_for_job_id(
         job_id: Uuid,
         conn: &mut AsyncPgConnection,
@@ -242,7 +242,7 @@ impl Job {
 
     /// Get all our our currently running datums (the ones being processed by
     /// a worker somewhere).
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(job = %self.id, status = %status), level = "trace")]
     pub async fn datums_with_status(
         &self,
         status: Status,
@@ -261,7 +261,7 @@ impl Job {
     ///
     /// This static method variant is useful inside async transactions where
     /// we can't easily call methods on `&mut self`.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(job = %job_id), level = "trace")]
     pub async fn find_and_lock_for_update(
         job_id: Uuid,
         conn: &mut AsyncPgConnection,
@@ -276,7 +276,7 @@ impl Job {
 
     /// Lock the underlying database row using `SELECT FOR UPDATE`. Must be
     /// called from within a transaction.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(job = %self.id), level = "trace")]
     pub async fn lock_for_update(
         &mut self,
         conn: &mut AsyncPgConnection,
@@ -286,7 +286,7 @@ impl Job {
     }
 
     /// Update the overall job status if there's nothing left to do.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(job = %self.id), level = "trace")]
     pub async fn update_status_if_done(
         &mut self,
         conn: &mut AsyncPgConnection,
@@ -386,7 +386,7 @@ impl Job {
     ///
     /// This is not the typical way jobs are marked as having errored, which is
     /// the responsibility of [`Job::update_status_if_done`].
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(job = %self.id), level = "trace")]
     pub async fn mark_as_error(&mut self, conn: &mut AsyncPgConnection) -> Result<()> {
         debug!("marking job {} as having errored", self.job_name);
         *self = diesel::update(jobs::table)
@@ -447,7 +447,7 @@ pub struct NewJob {
 
 impl NewJob {
     /// Insert a new job into the database.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(job = %self.id), level = "trace")]
     pub async fn insert(&self, conn: &mut AsyncPgConnection) -> Result<Job> {
         diesel::insert_into(jobs::table)
             .values(self)

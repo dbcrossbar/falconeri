@@ -4,6 +4,7 @@ use falconeri_common::{db, prelude::*};
 use prettytable::{format::consts::FORMAT_CLEAN, row, Table};
 
 /// The `job list` subcommand.
+#[instrument(level = "trace")]
 pub async fn run() -> Result<()> {
     // Look up the information to display.
     let pool = db::async_client_pool().await?;

@@ -67,6 +67,7 @@ impl InputFileData {
 ///
 /// Returns the datums and associated input files in a form well-suited to bulk
 /// database insert.
+#[instrument(skip_all, fields(job_id = %job_id), level = "trace")]
 pub async fn input_to_datums(
     secrets: &[Secret],
     job_id: Uuid,
@@ -114,6 +115,7 @@ fn input_to_datums_helper<'a>(
 }
 
 /// Convert a single `Input::Atom` to a list of datums.
+#[instrument(skip_all, fields(uri = %uri, repo = %repo, glob = ?glob), level = "trace")]
 async fn atom_to_datums_helper(
     secrets: &[Secret],
     uri: &str,

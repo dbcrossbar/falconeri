@@ -16,7 +16,7 @@ use falconeri_common::{chrono, db, kubernetes::get_all_job_names, prelude::*};
 use futures_util::FutureExt;
 
 /// Spawn a tokio task and run the babysitter in it. This should run indefinitely.
-#[tracing::instrument(level = "trace", skip(pool))]
+#[instrument(skip_all, level = "trace")]
 pub fn start_babysitter(pool: db::AsyncPool) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // If this task panics, attempt to shut down the entire process, forcing
@@ -47,7 +47,7 @@ pub fn start_babysitter(pool: db::AsyncPool) -> tokio::task::JoinHandle<()> {
 }
 
 /// Actually run the babysitter.
-#[tracing::instrument(skip(pool), level = "trace")]
+#[instrument(skip_all, level = "trace")]
 async fn run_babysitter(pool: db::AsyncPool) {
     loop {
         // We always want to retry all errors. This way, if PostgreSQL is still
@@ -61,7 +61,7 @@ async fn run_babysitter(pool: db::AsyncPool) {
 
 /// Check our running jobs for various situations we might might need to deal
 /// with.
-#[tracing::instrument(skip(pool), level = "debug")]
+#[instrument(skip_all, level = "debug")]
 async fn check_running_jobs(pool: &db::AsyncPool) -> Result<()> {
     let mut conn = pool
         .get()
@@ -77,7 +77,7 @@ async fn check_running_jobs(pool: &db::AsyncPool) -> Result<()> {
 
 /// Check for jobs which should already be marked as finished, or which have
 /// vanished off the cluster.
-#[tracing::instrument(skip(conn), level = "debug")]
+#[instrument(skip_all, level = "debug")]
 async fn check_for_finished_and_vanished_jobs(
     conn: &mut AsyncPgConnection,
 ) -> Result<()> {
@@ -121,7 +121,7 @@ async fn check_for_finished_and_vanished_jobs(
 }
 
 /// Check for datums which claim to be running in a pod that no longer exists.
-#[tracing::instrument(skip(conn), level = "debug")]
+#[instrument(skip_all, level = "debug")]
 async fn check_for_zombie_datums(conn: &mut AsyncPgConnection) -> Result<()> {
     let zombies = Datum::zombies(conn).await?;
     for mut zombie in zombies {
@@ -166,7 +166,7 @@ async fn check_for_zombie_datums(conn: &mut AsyncPgConnection) -> Result<()> {
 
 /// Check for datums which are in the error state but which are eligible for
 /// retries.
-#[tracing::instrument(skip(conn), level = "debug")]
+#[instrument(skip_all, level = "debug")]
 async fn check_for_datums_which_can_be_rerun(
     conn: &mut AsyncPgConnection,
 ) -> Result<()> {

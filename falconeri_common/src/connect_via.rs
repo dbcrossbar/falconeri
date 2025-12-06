@@ -17,7 +17,7 @@ pub enum ConnectVia {
 
 impl ConnectVia {
     /// Should we retry failed connections?
-    #[tracing::instrument(level = "trace")]
+    #[instrument(level = "trace")]
     pub fn should_retry_by_default(self) -> bool {
         match self {
             // When we're connected via a proxy from outside the cluster, it's
@@ -45,7 +45,7 @@ impl ConnectVia {
     /// Run the function `f`. If `self.should_retry_by_default()` is true, retry
     /// failures using exponential backoff. Return either the result or the final
     /// final failure.
-    #[tracing::instrument(skip(f), level = "trace")]
+    #[instrument(skip(f), level = "trace")]
     pub fn retry_if_appropriate<F, T>(self, f: F) -> Result<T>
     where
         F: FnMut() -> Result<T>,
@@ -57,7 +57,7 @@ impl ConnectVia {
     }
 
     /// Async version of `retry_if_appropriate` for use with async HTTP clients.
-    #[tracing::instrument(skip(f), level = "trace")]
+    #[instrument(skip(f), level = "trace")]
     pub async fn retry_if_appropriate_async<F, Fut, T>(self, f: F) -> Result<T>
     where
         F: FnMut() -> Fut,

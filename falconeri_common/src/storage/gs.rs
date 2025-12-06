@@ -15,7 +15,7 @@ pub struct GoogleCloudStorage {}
 impl GoogleCloudStorage {
     /// Create a new `GoogleCloudStorage` backend.
     #[allow(clippy::new_ret_no_self)]
-    #[tracing::instrument(level = "trace")]
+    #[instrument(skip_all, level = "trace")]
     pub fn new(_secrets: &[Secret]) -> Result<Self> {
         // We don't yet know how to authenticate using secrets.
         Ok(GoogleCloudStorage {})
@@ -24,7 +24,7 @@ impl GoogleCloudStorage {
 
 #[async_trait]
 impl CloudStorage for GoogleCloudStorage {
-    #[tracing::instrument(level = "trace")]
+    #[instrument(skip_all, fields(uri = %uri), level = "trace")]
     async fn list(&self, uri: &str) -> Result<Vec<String>> {
         trace!("listing {}", uri);
         // Shell out to gsutil to list the files we want to process.
@@ -48,7 +48,7 @@ impl CloudStorage for GoogleCloudStorage {
         Ok(paths.into_iter().collect())
     }
 
-    #[tracing::instrument(level = "trace")]
+    #[instrument(skip_all, fields(uri = %uri, local_path = %local_path.display()), level = "trace")]
     async fn sync_down(&self, uri: &str, local_path: &Path) -> Result<()> {
         if uri.ends_with('/') {
             // We have a directory. If our source URI ends in `/`, so should our
@@ -91,7 +91,7 @@ impl CloudStorage for GoogleCloudStorage {
         Ok(())
     }
 
-    #[tracing::instrument(level = "trace")]
+    #[instrument(skip_all, fields(local_path = %local_path.display(), uri = %uri), level = "trace")]
     async fn sync_up(&self, local_path: &Path, uri: &str) -> Result<()> {
         trace!("uploading {} to {}", local_path.display(), uri);
         let status = Command::new("gsutil")

@@ -33,7 +33,7 @@ pub struct S3Storage {
 impl S3Storage {
     /// Create a new `S3Storage` backend.
     #[allow(clippy::new_ret_no_self)]
-    #[tracing::instrument(level = "trace")]
+    #[instrument(skip_all, level = "trace")]
     pub async fn new(secrets: &[Secret]) -> Result<Self> {
         let secret = secrets.iter().find(|s| {
             matches!(s, Secret::Env { env_var, .. } if env_var == "AWS_ACCESS_KEY_ID")
@@ -48,7 +48,7 @@ impl S3Storage {
 
     /// Construct a new `S3Storage` backend, using an AWS access key from
     /// the Kubernetes secret `secret_name`.
-    #[tracing::instrument(level = "trace")]
+    #[instrument(skip_all, fields(secret_name = %secret_name), level = "trace")]
     pub async fn new_with_secret(secret_name: &str) -> Result<Self> {
         Ok(S3Storage {
             secret_data: kubectl_secret(secret_name).await?,
@@ -57,7 +57,7 @@ impl S3Storage {
 
     /// Build a `Command` object which calls the `aws` CLI tool, including any
     /// authentication that we happen to have.
-    #[tracing::instrument(level = "trace")]
+    #[instrument(skip_all, level = "trace")]
     fn aws_command(&self) -> Command {
         let mut command = Command::new("aws");
         if let Some(secret_data) = &self.secret_data {
@@ -77,7 +77,7 @@ impl fmt::Debug for S3Storage {
 
 #[async_trait]
 impl CloudStorage for S3Storage {
-    #[tracing::instrument(level = "trace")]
+    #[instrument(skip_all, fields(uri = %uri), level = "trace")]
     async fn list(&self, uri: &str) -> Result<Vec<String>> {
         trace!("listing {}", uri);
 
@@ -125,7 +125,7 @@ impl CloudStorage for S3Storage {
             .collect::<Vec<_>>())
     }
 
-    #[tracing::instrument(level = "trace")]
+    #[instrument(skip_all, fields(uri = %uri, local_path = %local_path.display()), level = "trace")]
     async fn sync_down(&self, uri: &str, local_path: &Path) -> Result<()> {
         trace!("downloading {} to {}", uri, local_path.display());
         if uri.ends_with('/') {
@@ -162,7 +162,7 @@ impl CloudStorage for S3Storage {
         Ok(())
     }
 
-    #[tracing::instrument(level = "trace")]
+    #[instrument(skip_all, fields(local_path = %local_path.display(), uri = %uri), level = "trace")]
     async fn sync_up(&self, local_path: &Path, uri: &str) -> Result<()> {
         trace!("uploading {} to {}", local_path.display(), uri);
 
@@ -187,7 +187,6 @@ impl CloudStorage for S3Storage {
 }
 
 /// Parse an S3 URL.
-#[tracing::instrument(level = "trace")]
 fn parse_s3_url(url: &str) -> Result<(&str, &str)> {
     // lazy_static allows us to compile this regex only once.
     lazy_static! {

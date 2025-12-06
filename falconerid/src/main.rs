@@ -33,6 +33,7 @@ use crate::start_job::{retry_job, run_job};
 use crate::util::{AppState, DbConn, FalconeridError, FalconeridResult, User};
 
 /// Initialize the server at startup (run migrations).
+#[instrument(level = "debug")]
 async fn initialize_server() -> Result<()> {
     // Print our some information about our environment.
     eprintln!("Running in {}", env::current_dir()?.display());
@@ -218,6 +219,7 @@ async fn patch_output_files(
 }
 
 #[tokio::main]
+#[instrument(level = "debug")]
 async fn main() -> Result<()> {
     initialize_tracing();
     falconeri_common::init_openssl_probe();

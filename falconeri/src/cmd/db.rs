@@ -19,6 +19,7 @@ pub enum Opt {
 ///
 /// These commands are async because we need to fetch the database URL via kubectl,
 /// but the actual psql execution stays sync (it's interactive with inherited stdio).
+#[instrument(skip_all, level = "trace")]
 pub async fn run(opt: &Opt) -> Result<()> {
     match opt {
         Opt::Console => run_console().await,
@@ -27,6 +28,7 @@ pub async fn run(opt: &Opt) -> Result<()> {
 }
 
 /// Connect to the database console.
+#[instrument(level = "debug")]
 async fn run_console() -> Result<()> {
     let url = db::database_url(ConnectVia::Proxy).await?;
     // Use std::process::Command (sync) because psql is interactive
@@ -43,6 +45,7 @@ async fn run_console() -> Result<()> {
 }
 
 /// Print out the database URL.
+#[instrument(level = "trace")]
 async fn run_url() -> Result<()> {
     let url = db::database_url(ConnectVia::Proxy).await?;
     println!("{}", url);

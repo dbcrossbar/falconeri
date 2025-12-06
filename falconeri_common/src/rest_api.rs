@@ -63,7 +63,7 @@ pub struct Client {
 
 impl Client {
     /// Create a new client, connecting to `falconerid` as specified.
-    #[tracing::instrument(level = "trace")]
+    #[instrument(level = "trace")]
     pub async fn new(via: ConnectVia) -> Result<Client> {
         // Choose an appropriate URL.
         let url = match via {
@@ -109,7 +109,7 @@ impl Client {
     /// `falconeri` and never `falconeri-worker`).
     ///
     /// `POST /jobs`
-    #[tracing::instrument(level = "trace")]
+    #[instrument(skip_all, level = "trace")]
     pub async fn new_job(&self, pipeline_spec: &PipelineSpec) -> Result<Job> {
         let url = self.url.join("jobs")?;
         let resp = self
@@ -126,7 +126,7 @@ impl Client {
     /// Fetch a job by ID.
     ///
     /// `GET /jobs/<job_id>`
-    #[tracing::instrument(level = "trace")]
+    #[instrument(skip_all, fields(id = %id), level = "trace")]
     pub async fn job(&self, id: Uuid) -> Result<Job> {
         let url = self.url.join(&format!("jobs/{}", id))?;
         self.via
@@ -146,7 +146,7 @@ impl Client {
     /// Fetch a job by name.
     ///
     /// `GET /jobs?job_name=$NAME`
-    #[tracing::instrument(level = "trace")]
+    #[instrument(skip_all, fields(job_name = %job_name), level = "trace")]
     pub async fn find_job_by_name(&self, job_name: &str) -> Result<Job> {
         let mut url = self.url.join("jobs")?;
         url.query_pairs_mut()
@@ -171,7 +171,7 @@ impl Client {
     /// Not idempotent because it's expensive and only called by `falconeri`.
     ///
     /// `POST /jobs/<job_id>/retry`
-    #[tracing::instrument(level = "trace")]
+    #[instrument(skip_all, fields(job = %job.id), level = "trace")]
     pub async fn retry_job(&self, job: &Job) -> Result<Job> {
         let url = self.url.join(&format!("jobs/{}/retry", job.id))?;
         let resp = self
@@ -189,7 +189,7 @@ impl Client {
     /// pod.
     ///
     /// `POST /jobs/<job_id>/reserve_next_datum`
-    #[tracing::instrument(level = "trace")]
+    #[instrument(skip_all, fields(job = %job.id), level = "trace")]
     pub async fn reserve_next_datum(
         &self,
         job: &Job,
@@ -218,7 +218,7 @@ impl Client {
     }
 
     /// Mark `datum` as done, and record the output of the commands we ran.
-    #[tracing::instrument(level = "trace")]
+    #[instrument(skip_all, fields(datum_id = %datum.id), level = "trace")]
     pub async fn mark_datum_as_done(
         &self,
         datum: &mut Datum,
@@ -235,7 +235,7 @@ impl Client {
 
     /// Mark `datum` as having failed, and record the output and error
     /// information.
-    #[tracing::instrument(level = "trace")]
+    #[instrument(skip_all, fields(datum = %datum.id), level = "trace")]
     pub async fn mark_datum_as_error(
         &self,
         datum: &mut Datum,
@@ -255,7 +255,7 @@ impl Client {
     /// Apply `patch` to `datum`.
     ///
     /// `PATCH /datums/<datum_id>`
-    #[tracing::instrument(level = "trace")]
+    #[instrument(skip_all, fields(datum = %datum.id), level = "trace")]
     async fn patch_datum(&self, datum: &mut Datum, patch: &DatumPatch) -> Result<()> {
         let url = self.url.join(&format!("datums/{}", datum.id))?;
         let updated_datum = self
@@ -279,7 +279,7 @@ impl Client {
     /// Create new output files.
     ///
     /// `POST /output_files`
-    #[tracing::instrument(level = "trace")]
+    #[instrument(level = "trace", skip_all)]
     pub async fn create_output_files(
         &self,
         files: &[NewOutputFile],
@@ -307,7 +307,7 @@ impl Client {
     /// Update the status of existing output files.
     ///
     /// PATCH /output_files
-    #[tracing::instrument(level = "trace")]
+    #[instrument(level = "trace", skip_all)]
     pub async fn patch_output_files(&self, patches: &[OutputFilePatch]) -> Result<()> {
         let url = self.url.join("output_files")?;
         self.via
@@ -326,7 +326,7 @@ impl Client {
     }
 
     /// Check the HTTP status code and parse a JSON response.
-    #[tracing::instrument(level = "trace")]
+    #[instrument(level = "trace", skip_all, fields(url = %url))]
     async fn handle_json_response<T>(
         &self,
         url: &Url,
@@ -347,7 +347,7 @@ impl Client {
     }
 
     /// Check the HTTP status code and parse a JSON response.
-    #[tracing::instrument(level = "trace")]
+    #[instrument(level = "trace", skip_all, fields(url = %url))]
     async fn handle_empty_response(
         &self,
         url: &Url,
@@ -361,7 +361,7 @@ impl Client {
     }
 
     /// Extract an error from an HTTP respone payload.
-    #[tracing::instrument(level = "trace")]
+    #[instrument(level = "trace", skip_all, fields(url = %url, status = %resp.status()))]
     async fn handle_error_response(
         &self,
         url: &Url,

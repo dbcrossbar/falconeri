@@ -11,6 +11,7 @@ use std::cmp::min;
 use crate::inputs::input_to_datums;
 
 /// Run a new job on our cluster.
+#[instrument(skip_all, level = "debug")]
 pub async fn run_job(
     pipeline_spec: &PipelineSpec,
     conn: &mut AsyncPgConnection,
@@ -76,6 +77,7 @@ pub async fn run_job(
 }
 
 /// The `job retry` subcommand.
+#[instrument(skip_all, fields(job = %job.id), level = "debug")]
 pub async fn retry_job(job: &Job, conn: &mut AsyncPgConnection) -> Result<Job> {
     // Load the original job, failed datums, and input files.
     if job.status != Status::Error {
@@ -184,6 +186,7 @@ impl<'a> JobParams<'a> {
 }
 
 /// Start a new batch job running.
+#[instrument(skip_all, fields(job = %job.id), level = "debug")]
 pub async fn start_batch_job(pipeline_spec: &PipelineSpec, job: &Job) -> Result<()> {
     debug!("starting batch job on cluster");
 

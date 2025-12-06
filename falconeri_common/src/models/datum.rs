@@ -42,7 +42,7 @@ pub struct Datum {
 
 impl Datum {
     /// Find a datum by ID.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(id = %id), level = "trace")]
     pub async fn find(id: Uuid, conn: &mut AsyncPgConnection) -> Result<Datum> {
         datums::table
             .find(id)
@@ -52,7 +52,7 @@ impl Datum {
     }
 
     /// Find all datums with the specified status that belong to a running job.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(status = %status), level = "trace")]
     pub async fn active_with_status(
         status: Status,
         conn: &mut AsyncPgConnection,
@@ -72,7 +72,7 @@ impl Datum {
 
     /// Find datums which claim to be running, but whose `pod_name` points to a
     /// non-existant pod.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, level = "trace")]
     pub async fn zombies(conn: &mut AsyncPgConnection) -> Result<Vec<Datum>> {
         let running = Self::active_with_status(Status::Running, conn).await?;
         trace!("running datums: {:?}", running);
@@ -92,7 +92,7 @@ impl Datum {
     /// Find all datums which have errored, but that we can re-run.
     ///
     /// This will only return datums associated with running jobs.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, level = "trace")]
     pub async fn rerunable(conn: &mut AsyncPgConnection) -> Result<Vec<Datum>> {
         let datums = datums::table
             .inner_join(jobs::table)
@@ -119,7 +119,7 @@ impl Datum {
     }
 
     /// Get the input files for this datum.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(datum = %self.id), level = "trace")]
     pub async fn input_files(
         &self,
         conn: &mut AsyncPgConnection,
@@ -133,7 +133,7 @@ impl Datum {
 
     /// Lock the underying database row using `SELECT FOR UPDATE`. Must be
     /// called from within a transaction.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(datum = %self.id), level = "trace")]
     pub async fn lock_for_update(
         &mut self,
         conn: &mut AsyncPgConnection,
@@ -148,7 +148,7 @@ impl Datum {
     }
 
     /// Mark this datum as having been successfully processed.
-    #[tracing::instrument(skip(conn, output), level = "trace")]
+    #[instrument(skip_all, fields(datum = %self.id), level = "trace")]
     pub async fn mark_as_done(
         &mut self,
         output: &str,
@@ -168,7 +168,7 @@ impl Datum {
     }
 
     /// Mark this datum as having been unsuccessfully processed.
-    #[tracing::instrument(skip(conn, output, backtrace), level = "trace")]
+    #[instrument(skip_all, fields(datum = %self.id), level = "trace")]
     pub async fn mark_as_error(
         &mut self,
         output: &str,
@@ -195,7 +195,7 @@ impl Datum {
     ///
     /// We assume that the datum's row is locked by `lock_for_update` when we
     /// are called.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(datum = %self.id), level = "trace")]
     pub async fn mark_as_eligible_for_rerun(
         &mut self,
         conn: &mut AsyncPgConnection,
@@ -219,6 +219,7 @@ impl Datum {
     /// Update the status of our associate job, if it has finished.
     ///
     /// This calls [`Job::update_status_if_done`].
+    #[instrument(skip_all, fields(datum = %self.id, job = %self.job_id), level = "trace")]
     pub async fn update_job_status_if_done(
         &self,
         conn: &mut AsyncPgConnection,
@@ -265,11 +266,12 @@ pub struct NewDatum {
 
 impl NewDatum {
     /// Insert new datums into the database.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, level = "trace")]
     pub async fn insert_all(
         datums: &[Self],
         conn: &mut AsyncPgConnection,
     ) -> Result<()> {
+        trace!(datum_count = datums.len(), "inserting datums");
         diesel::insert_into(datums::table)
             .values(datums)
             .execute(conn)

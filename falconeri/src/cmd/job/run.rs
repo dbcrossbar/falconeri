@@ -3,6 +3,7 @@
 use falconeri_common::{pipeline::*, prelude::*, rest_api::Client};
 
 /// The `job run` subcommand.
+#[instrument(skip_all, level = "trace")]
 pub async fn run(pipeline_spec: &PipelineSpec) -> Result<()> {
     let client = Client::new(ConnectVia::Proxy).await?;
     let job = client.new_job(pipeline_spec).await?;

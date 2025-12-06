@@ -21,7 +21,7 @@ const USAGE: &str = "Usage: falconeri-worker <job id>";
 
 /// Our main entry point.
 #[tokio::main]
-#[tracing::instrument(level = "trace")]
+#[instrument(level = "debug")]
 async fn main() -> Result<()> {
     initialize_tracing();
     falconeri_common::init_openssl_probe();
@@ -113,7 +113,7 @@ async fn main() -> Result<()> {
 }
 
 /// Process a single datum.
-#[tracing::instrument(skip(to_record), level = "trace")]
+#[instrument(skip_all, fields(job = %job.id, datum = %datum.id), level = "trace")]
 async fn process_datum(
     client: &Client,
     job: &Job,
@@ -173,7 +173,7 @@ async fn process_datum(
 /// respectively, and write a copy to `to_record`.
 ///
 /// This function will panic if `child` does not have a `stdout` or `stderr`.
-#[tracing::instrument(skip(to_record), level = "trace")]
+#[instrument(skip_all, level = "trace")]
 async fn tee_child(child: &mut Child, to_record: Arc<RwLock<Vec<u8>>>) -> Result<()> {
     let stdout = child
         .stdout
@@ -203,7 +203,7 @@ async fn tee_child(child: &mut Child, to_record: Arc<RwLock<Vec<u8>>>) -> Result
 }
 
 /// Copy output from `from_child` to `to_console` and `to_record`.
-#[tracing::instrument(skip(from_child, to_console, to_record), level = "trace")]
+#[instrument(skip_all, level = "trace")]
 async fn tee_output<R, W>(
     mut from_child: R,
     mut to_console: W,
@@ -241,7 +241,7 @@ where
 }
 
 /// Reset our working directories to a default, clean state.
-#[tracing::instrument(level = "trace")]
+#[instrument(level = "trace")]
 fn reset_work_dirs() -> Result<()> {
     reset_work_dir(Path::new("/pfs/"))?;
     fs::create_dir("/pfs/out").context("cannot create /pfs/out")?;
@@ -250,7 +250,7 @@ fn reset_work_dirs() -> Result<()> {
 }
 
 /// Restore a directory to a default, clean state.
-#[tracing::instrument(level = "debug")]
+#[instrument(skip_all, fields(work_dir = %work_dir.display()), level = "debug")]
 fn reset_work_dir(work_dir: &Path) -> Result<()> {
     // Make sure our work dir still exists.
     if !work_dir.is_dir() {
@@ -286,7 +286,7 @@ fn reset_work_dir(work_dir: &Path) -> Result<()> {
 }
 
 /// Upload `/pfs/out` to our output bucket.
-#[tracing::instrument(level = "debug")]
+#[instrument(skip_all, fields(job = %job.id, datum = %datum.id), level = "debug")]
 async fn upload_outputs(client: &Client, job: &Job, datum: &Datum) -> Result<()> {
     // Create records describing the files we're going to upload.
     let mut new_output_files = vec![];

@@ -27,7 +27,7 @@ pub struct OutputFile {
 
 impl OutputFile {
     /// Find an output file by ID.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(output_file = %id), level = "trace")]
     pub async fn find(id: Uuid, conn: &mut AsyncPgConnection) -> Result<OutputFile> {
         output_files::table
             .find(id)
@@ -38,7 +38,7 @@ impl OutputFile {
 
     /// Fetch all the input files corresponding to `datums`, returning grouped
     /// in the same order.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(datum_id = %datum.id), level = "trace")]
     pub async fn delete_for_datum(
         datum: &Datum,
         conn: &mut AsyncPgConnection,
@@ -51,7 +51,7 @@ impl OutputFile {
     }
 
     /// Mark the specified output files as having been successfully processed.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(ids = ?ids), level = "trace")]
     pub async fn mark_ids_as_done(
         ids: &[Uuid],
         conn: &mut AsyncPgConnection,
@@ -67,8 +67,8 @@ impl OutputFile {
         Ok(())
     }
 
-    /// Mark the specified output files as having been successfully processed.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    /// Mark the specified output files as having been unsuccessfully processed.
+    #[instrument(skip_all, fields(ids = ?ids), level = "trace")]
     pub async fn mark_ids_as_error(
         ids: &[Uuid],
         conn: &mut AsyncPgConnection,
@@ -86,7 +86,7 @@ impl OutputFile {
 
     /// Mark the output files of this datum as having been successfully
     /// processed.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(datum_id = %datum.id), level = "trace")]
     pub async fn mark_as_done_by_datum(
         datum: &Datum,
         conn: &mut AsyncPgConnection,
@@ -104,7 +104,7 @@ impl OutputFile {
 
     /// Mark the output files of this datum as having been unsuccessfully
     /// processed.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, fields(datum_id = %datum.id), level = "trace")]
     pub async fn mark_as_error_by_datum(
         datum: &Datum,
         conn: &mut AsyncPgConnection,
@@ -135,11 +135,15 @@ pub struct NewOutputFile {
 
 impl NewOutputFile {
     /// Insert new output files into the database.
-    #[tracing::instrument(skip(conn), level = "trace")]
+    #[instrument(skip_all, level = "trace")]
     pub async fn insert_all(
         output_files: &[Self],
         conn: &mut AsyncPgConnection,
     ) -> Result<Vec<OutputFile>> {
+        trace!(
+            output_file_count = output_files.len(),
+            "inserting output files"
+        );
         let output_files = diesel::insert_into(output_files::table)
             .values(output_files)
             .get_results::<OutputFile>(conn)

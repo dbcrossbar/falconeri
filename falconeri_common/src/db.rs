@@ -29,7 +29,7 @@ struct FalconeriSecretData {
 }
 
 /// Look up our PostgreSQL password in our cluster's `falconeri` secret.
-#[tracing::instrument(level = "trace")]
+#[instrument(level = "trace")]
 pub async fn postgres_password(via: ConnectVia) -> Result<String> {
     match via {
         ConnectVia::Proxy => {
@@ -51,7 +51,7 @@ pub async fn postgres_password(via: ConnectVia) -> Result<String> {
 }
 
 /// Get an appropriate database URL.
-#[tracing::instrument(level = "trace")]
+#[instrument(level = "trace")]
 pub async fn database_url(via: ConnectVia) -> Result<String> {
     // Check the environment first, so it can be overridden for testing outside
     // of a full Kubernetes setup.
@@ -81,7 +81,7 @@ pub type AsyncPool = AsyncPoolInner<AsyncPgConnection>;
 pub type AsyncPooledConn = PooledConnection<AsyncPgConnection>;
 
 /// Create an async connection pool using the specified parameters.
-#[tracing::instrument(level = "trace")]
+#[instrument(level = "trace")]
 pub async fn async_pool(pool_size: usize, via: ConnectVia) -> Result<AsyncPool> {
     let database_url = database_url(via).await?;
     let config = AsyncDieselConnectionManager::<AsyncPgConnection>::new(database_url);
@@ -99,6 +99,7 @@ pub async fn async_pool(pool_size: usize, via: ConnectVia) -> Result<AsyncPool> 
 /// database. We use a pool here just to get the right connection type.
 ///
 /// TODO: Consider moving all callers to the REST API.
+#[instrument(level = "trace")]
 pub async fn async_client_pool() -> Result<AsyncPool> {
     async_pool(1, ConnectVia::Proxy).await
 }
@@ -107,7 +108,7 @@ pub async fn async_client_pool() -> Result<AsyncPool> {
 ///
 /// This is used for migrations where we need a raw connection rather than
 /// a pooled one.
-#[tracing::instrument(level = "trace")]
+#[instrument(level = "trace")]
 pub async fn async_connect(via: ConnectVia) -> Result<AsyncPgConnection> {
     let url = database_url(via).await?;
     via.retry_if_appropriate_async(|| async {
@@ -122,7 +123,7 @@ pub async fn async_connect(via: ConnectVia) -> Result<AsyncPgConnection> {
 ///
 /// Uses `AsyncMigrationHarness` which internally uses `block_in_place` to run
 /// diesel's sync migration infrastructure without blocking the async runtime.
-#[tracing::instrument(skip(conn), level = "trace")]
+#[instrument(skip_all, level = "trace")]
 pub fn run_pending_migrations(conn: AsyncPgConnection) -> Result<AsyncPgConnection> {
     debug!("Running pending migrations");
     let mut harness = AsyncMigrationHarness::new(conn);

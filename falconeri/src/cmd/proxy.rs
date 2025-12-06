@@ -3,6 +3,7 @@
 use falconeri_common::{kubernetes, prelude::*};
 
 /// Run our proxy.
+#[instrument(level = "trace")]
 pub async fn run() -> Result<()> {
     let postgres_handle =
         tokio::spawn(async { forward("svc/falconeri-postgres", "5432:5432").await });
@@ -21,6 +22,7 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
+#[instrument(level = "debug")]
 async fn forward(service: &str, port: &str) -> Result<()> {
     kubernetes::kubectl(&["port-forward", service, port]).await
 }

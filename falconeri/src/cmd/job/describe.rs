@@ -17,6 +17,7 @@ struct Params {
 }
 
 /// The `job describe` subcommand.
+#[instrument(level = "trace")]
 pub async fn run(job_name: &str) -> Result<()> {
     // Load the data we want to display.
     let pool = db::async_client_pool().await?;
