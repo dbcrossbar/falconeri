@@ -16,7 +16,7 @@ This is a Cargo workspace with multiple crates:
     - `src/cmd/` - Command implementations (deploy, job, proxy, migrate, etc.)
     - `src/cmd/deploy_manifest.yml.hbs` - Kubernetes deployment template
 - `falconerid/` - Backend server
-    - `src/main.rs` - Rocket/Axum REST API server
+    - `src/main.rs` - Axum REST API server
     - `src/babysitter.rs` - Monitors running jobs
     - `src/start_job.rs` - Creates K8s batch jobs from pipeline specs
 - `falconeri-worker/` - Worker process
@@ -65,43 +65,21 @@ You can omit the binaries that you're not testing. Also note that getting enviro
 
 ## Docker and Kubernetes
 
-### Building images
+For local development setup (Colima on macOS, minikube on Linux), see the [Local Development](guide/src/local.md) guide.
 
-- `just image`: Build the Docker image (tagged with current version)
-- `just static-bin`: Build static musl binaries in Docker
+### Docker context (run before `just image`)
 
-### Local development with minikube
+- macOS: `docker context use colima`
+- Linux: `eval $(minikube docker-env)` (run in each terminal)
 
-```sh
-# Start minikube and point Docker at it
-minikube start
-eval $(minikube docker-env)
+### Key commands
 
-# Build the image (must have docker-env set up)
-just image
-
-# Deploy falconeri in development mode
-cargo run -p falconeri -- deploy --development
-
-# In another terminal, create a proxy connection
-cargo run -p falconeri -- proxy
-
-# Run database migrations
-cargo run -p falconeri -- migrate
-```
-
-Check cluster status with `kubectl get all`.
-
-### Key deployment commands
-
-Normally only the user will run these against a real cluster. In development, use minikube as above. But it's worth understanding the workflow in order to maintain it.
-
-- `falconeri deploy`: Deploy falconeri to current K8s cluster
-- `falconeri deploy --development`: Development mode (fewer replicas, local images)
-- `falconeri deploy --dry-run`: Preview generated manifest
-- `falconeri undeploy`: Remove falconeri from cluster
-- `falconeri proxy`: Create proxy connection to cluster
-- `falconeri migrate`: Run database schema migrations
+- `just static-bin`: Build static musl binaries to `target/x86_64-unknown-linux-musl/debug/`
+- `just image`: Build the Docker image (depends on static-bin)
+- `cargo run -p falconeri -- deploy --development`: Deploy in development mode
+- `cargo run -p falconeri -- proxy`: Create proxy connection to cluster
+- `cargo run -p falconeri -- migrate`: Run database schema migrations
+- `kubectl get all`: Check cluster status
 
 ## Running the Example Pipeline
 

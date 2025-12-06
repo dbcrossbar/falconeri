@@ -1,4 +1,6 @@
 gh-pages
 guide/book
 justfile
-target
+# Ignore most of target, but allow musl binaries for Docker builds
+target/*
+!target/x86_64-unknown-linux-musl

@@ -1,7 +1,11 @@
 # Summary
 
 - [Introduction](./introduction.md)
-- [Installation](./installation.md)
+- [Production Installation](./installation.md)
+- [Local Development](./local.md)
+  - [macOS Setup](./local/mac.md)
+  - [Linux Setup](./local/linux.md)
+  - [Building and Running](./local/running.md)
 - [Job specification](./specification.md)
 - [Creating Docker images](./images.md)
 - [Commands](./commands.md)

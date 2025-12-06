@@ -21,12 +21,6 @@ For all setups, you will also need:
 - `kubectl`, compatible with your version of Kubernetes.
 - `falconeri`, which you should be able to find on the [releases page][releases].
 
-On the Mac, you will also need to install OpenSSL shared libraries. You can do this using `brew`:
-
-```sh
-brew install openssl@1.1
-```
-
 [releases]: https://github.com/faradayio/falconeri/releases
 
 ## Authenticating with your cluster

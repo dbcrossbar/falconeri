@@ -6,7 +6,7 @@ FROM alpine:3.14
 # https://github.com/GoogleCloudPlatform/cloud-sdk-docker/blob/master/alpine/Dockerfile.
 ARG CLOUD_SDK_VERSION=364.0.0
 ENV CLOUD_SDK_VERSION=$CLOUD_SDK_VERSION
-ENV PATH /google-cloud-sdk/bin:$PATH
+ENV PATH=/google-cloud-sdk/bin:$PATH
 RUN apk --no-cache --update add \
         curl \
         python3 \
@@ -39,8 +39,9 @@ RUN chmod +x /usr/local/bin/kubectl
 # Run our webserver out of /app.
 WORKDIR /app
 
-# Build target.
+# Build target and mode.
 ARG MODE=debug
+ARG MUSL_TARGET=x86_64-unknown-linux-musl
 
 # Copy static executables into container.
-ADD bin/${MODE}/falconerid bin/${MODE}/falconeri-worker /usr/local/bin/
+ADD target/${MUSL_TARGET}/${MODE}/falconerid target/${MUSL_TARGET}/${MODE}/falconeri-worker /usr/local/bin/
