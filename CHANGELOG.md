@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **BREAKING:** Migrated from Rocket to axum web framework.
+- **BREAKING:** Migrated from sync diesel to diesel-async with tokio-postgres.
+- **BREAKING:** Completely eliminated OpenSSL and libpq dependencies. Now uses pure-Rust rustls for TLS and tokio-postgres for database connections.
+- Replaced `ekidd/rust-musl-builder` with standard Rust musl toolchain for builds.
+- Database pool size is now configured via `FALCONERID_POOL_SIZE` environment variable (defaults to 32).
+- Removed `Rocket.toml` configuration file; server configuration is now hardcoded or via environment variables.
+
+### Removed
+
+- `openssl-sys`, `openssl-probe`, and `pq-sys` dependencies.
+- `ROCKET_ENV` and `ROCKET_CONFIG` environment variables (no longer used).
+
 ## [1.0.0-beta.12] - 2022-12-14
 
 ### Fixed

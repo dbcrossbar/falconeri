@@ -13,16 +13,13 @@ diesel-async = { version = "0.7", features = ["postgres", "deadpool"] }
 falconeri_common = { path = "../falconeri_common" }
 futures-util = "0.3"
 http = "1"
-num_cpus = "1"
-# Needed for ekidd/rust-musl-builder.
-openssl-sys = "*"
 serde = "1.0"
 serde_derive = "1.0"
 serde_json = "1.0"
 serde_yaml = "0.9"
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace"] }
+tower-http = { version = "0.6", features = ["trace", "limit"] }
 tracing = "0.1.29"
 
 

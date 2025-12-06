@@ -1,8 +1,5 @@
 #![deny(unsafe_code)]
 
-// Needed for static linking to work right on Linux.
-extern crate openssl_sys;
-
 use axum::{
     extract::{Path, Query},
     http::StatusCode,
@@ -10,6 +7,7 @@ use axum::{
     Json, Router,
 };
 use diesel_async::{scoped_futures::ScopedFutureExt, AsyncConnection};
+use tower_http::limit::RequestBodyLimitLayer;
 
 use falconeri_common::{
     db, falconeri_common_version,
@@ -222,14 +220,17 @@ async fn patch_output_files(
 #[instrument(level = "debug")]
 async fn main() -> Result<()> {
     initialize_tracing();
-    falconeri_common::init_openssl_probe();
     initialize_server()
         .await
         .context("Failed to initialize server")?;
 
-    // Set up application state. Use 2x CPU count for pool size to match
-    // Rocket's default worker count, which was tested under heavy load.
-    let pool = db::async_pool(num_cpus::get() * 2, ConnectVia::Cluster).await?;
+    // Set up application state. Pool size is configured via environment variable,
+    // with defaults matching historical Rocket configuration (32 for production).
+    let pool_size: usize = env::var("FALCONERID_POOL_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(32);
+    let pool = db::async_pool(pool_size, ConnectVia::Cluster).await?;
     let admin_password = db::postgres_password(ConnectVia::Cluster).await?;
 
     // Start babysitter tokio task to monitor jobs. Give it its own pool so it
@@ -263,6 +264,8 @@ async fn main() -> Result<()> {
             "/output_files",
             post(create_output_files).patch(patch_output_files),
         )
+        // 50 MB limit to match previous Rocket.toml configuration
+        .layer(RequestBodyLimitLayer::new(52_428_800))
         .with_state(state);
 
     // Start the server.

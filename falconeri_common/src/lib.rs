@@ -36,7 +36,7 @@ pub mod tracing_support;
 pub mod prelude {
     pub use anyhow::{format_err, Context};
     pub use chrono::{NaiveDateTime, Utc};
-    pub use diesel::{self, prelude::*, PgConnection};
+    pub use diesel::{self, prelude::*};
     pub use diesel_async::AsyncPgConnection;
     pub use serde::{Deserialize, Serialize};
     pub use std::{
@@ -69,26 +69,4 @@ pub fn falconeri_common_version() -> semver::Version {
     env!("CARGO_PKG_VERSION")
         .parse::<semver::Version>()
         .expect("could not parse built-in version")
-}
-
-/// Initialize OpenSSL certificate paths by probing the system.
-///
-/// This should be called early in main(), before spawning threads or making
-/// TLS connections. It's a safe wrapper around `openssl_probe::probe()`.
-pub fn init_openssl_probe() {
-    use std::env;
-
-    let result = openssl_probe::probe();
-
-    if let Some(cert_file) = result.cert_file {
-        if env::var_os("SSL_CERT_FILE").is_none() {
-            env::set_var("SSL_CERT_FILE", cert_file);
-        }
-    }
-
-    if let Some(cert_dir) = result.cert_dir {
-        if env::var_os("SSL_CERT_DIR").is_none() {
-            env::set_var("SSL_CERT_DIR", cert_dir);
-        }
-    }
 }

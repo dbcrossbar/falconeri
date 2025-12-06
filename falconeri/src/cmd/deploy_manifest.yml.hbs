@@ -107,10 +107,8 @@ spec:
 {{/if}}
         args: ["falconerid"]
         env:
-        - name: ROCKET_ENV
-          value: "{{config.env}}"
-        - name: ROCKET_CONFIG
-          value: "/app/Rocket.toml"
+        - name: FALCONERID_POOL_SIZE
+          value: "{{config.falconerid_pool_size}}"
         - name: RUST_LOG
           value: "{{config.falconerid_log_level}}"
         resources:

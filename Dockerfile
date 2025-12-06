@@ -39,9 +39,6 @@ RUN chmod +x /usr/local/bin/kubectl
 # Run our webserver out of /app.
 WORKDIR /app
 
-# Configure our Rocket webserver.
-ADD falconerid/Rocket.toml .
-
 # Build target.
 ARG MODE=debug
 

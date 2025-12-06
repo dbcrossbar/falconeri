@@ -1,15 +1,28 @@
-FROM ekidd/rust-musl-builder:stable
+# Build static musl binaries for falconeri.
+#
+# Now that we've eliminated OpenSSL and libpq dependencies, we can use
+# standard Rust tooling instead of ekidd/rust-musl-builder.
+FROM rust:1-slim
 
-# We need to add the source code to the image because `rust-musl-builder`
-# assumes a UID of 1000, but TravisCI has switched to 2000.
-ADD . ./
-RUN sudo chown -R rust:rust .
+# Install musl toolchain and mdbook for documentation.
+RUN apt-get update && \
+    apt-get install -y musl-tools curl && \
+    rm -rf /var/lib/apt/lists/* && \
+    rustup target add x86_64-unknown-linux-musl && \
+    cargo install mdbook cargo-deny
+
+# Create a non-root user for building.
+RUN useradd -m -u 1000 rust
+USER rust
+WORKDIR /home/rust/src
+
+# Copy source code.
+COPY --chown=rust:rust . .
 
 # Extra arguments to pass to cargo.
 ENV CARGO_ARGS=
 
-# Build all binaries.
-CMD if [ -d target ]; then sudo chown -R rust:rust /home/rust/.cargo/git /home/rust/.cargo/registry /home/rust/src/target; fi && \
-    cargo deny check && \
-    cargo build --all ${CARGO_ARGS} && \
+# Build all binaries targeting musl.
+CMD cargo deny check && \
+    cargo build --target x86_64-unknown-linux-musl --all ${CARGO_ARGS} && \
     cd guide && mdbook build

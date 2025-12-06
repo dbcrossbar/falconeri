@@ -1,8 +1,5 @@
 #![deny(unsafe_code)]
 
-// Needed for static linking to work right on Linux.
-extern crate openssl_sys;
-
 use clap::Parser;
 use falconeri_common::prelude::*;
 
@@ -60,7 +57,6 @@ enum Opt {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    falconeri_common::init_openssl_probe();
     let opt = Opt::parse();
     debug!("Args: {:?}", opt);
 

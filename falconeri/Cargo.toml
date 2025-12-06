@@ -11,8 +11,6 @@ base64 = "0.22"
 falconeri_common = { path = "../falconeri_common" }
 handlebars = "6"
 log = "0.4.3"
-# Needed for ekidd/rust-musl-builder.
-openssl-sys = "*"
 prettytable-rs = "0.10.0"
 serde = "1.0"
 serde_derive = "1.0"

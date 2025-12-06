@@ -44,6 +44,8 @@ struct Config {
     falconerid_cpu: String,
     /// The RUST_LOG value to pass to `falconerid`.
     falconerid_log_level: String,
+    /// The database connection pool size for `falconerid`.
+    falconerid_pool_size: u16,
     /// Should we get our `falconeri` image from `minikube`'s internal Docker
     /// daemon?
     use_local_image: bool,
@@ -206,6 +208,7 @@ fn default_config(development: bool) -> Config {
             falconerid_cpu: "100m".to_string(),
             falconerid_log_level: "falconeri_common=debug,falconerid=debug,warn"
                 .to_string(),
+            falconerid_pool_size: 4,
             use_local_image: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
         }
@@ -220,6 +223,7 @@ fn default_config(development: bool) -> Config {
             falconerid_memory: "256Mi".to_string(),
             falconerid_cpu: "450m".to_string(),
             falconerid_log_level: "warn".to_string(),
+            falconerid_pool_size: 32,
             use_local_image: false,
             version: env!("CARGO_PKG_VERSION").to_string(),
         }
