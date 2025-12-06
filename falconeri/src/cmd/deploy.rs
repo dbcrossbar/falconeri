@@ -28,6 +28,9 @@ struct SecretManifestParams {
 struct Config {
     /// The name of the environment. Should be `development` or `production`.
     env: String,
+    /// The storage class name for PostgreSQL PVC. If unspecified, uses cluster
+    /// default. For AWS EKS with gp3 volumes, this should be `gp3`.
+    storage_class_name: Option<String>,
     /// The version of PostgreSQL to deploy.
     postgres_version: String,
     /// The amount of disk to allocate for PostgreSQL.
@@ -75,6 +78,11 @@ pub struct Opt {
     /// Deploy a development server (for minikube).
     #[arg(long = "development")]
     development: bool,
+
+    /// The storage class name for the PostgreSQL PVC. If not specified, uses
+    /// the cluster's default storage class.
+    #[arg(long = "storage-class-name")]
+    storage_class_name: Option<String>,
 
     /// The version of PostgreSQL to deploy. It's generally OK to specify just
     /// the major version, like "14".
@@ -128,6 +136,9 @@ pub async fn run(opt: &Opt) -> Result<()> {
 
     // Figure out our configuration.
     let mut config = default_config(opt.development);
+    if let Some(storage_class_name) = &opt.storage_class_name {
+        config.storage_class_name = Some(storage_class_name.to_owned());
+    }
     config.postgres_version = opt.postgres_version.clone();
     if let Some(postgres_storage) = &opt.postgres_storage {
         config.postgres_storage = postgres_storage.to_owned();
@@ -199,6 +210,7 @@ fn default_config(development: bool) -> Config {
     if development {
         Config {
             env: "development".to_string(),
+            storage_class_name: None,
             postgres_version: POSTGRES_VERSION.to_string(),
             postgres_storage: "100Mi".to_string(),
             postgres_memory: "256Mi".to_string(),
@@ -215,6 +227,7 @@ fn default_config(development: bool) -> Config {
     } else {
         Config {
             env: "production".to_string(),
+            storage_class_name: None,
             postgres_version: POSTGRES_VERSION.to_string(),
             postgres_storage: "10Gi".to_string(),
             postgres_memory: "1Gi".to_string(),

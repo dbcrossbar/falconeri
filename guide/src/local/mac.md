@@ -14,6 +14,26 @@ brew install filosottile/musl-cross/musl-cross
 
 The `.cargo/config.toml` file is already configured to use this linker.
 
+### PostgreSQL client
+
+For database access with `falconeri db console`:
+
+```sh
+brew install libpq
+```
+
+Add libpq to your PATH (add to your shell profile):
+
+```sh
+export PATH="/opt/homebrew/opt/libpq/bin:$PATH"
+```
+
+Alternatively, you can install the full PostgreSQL package:
+
+```sh
+brew install postgresql
+```
+
 ### Colima
 
 ```sh

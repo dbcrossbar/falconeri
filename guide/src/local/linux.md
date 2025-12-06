@@ -14,6 +14,18 @@ sudo apt-get install musl-tools musl-dev
 
 For other distributions, install the equivalent `musl-tools` or `musl-gcc` package.
 
+### PostgreSQL client
+
+For database access with `falconeri db console`:
+
+```sh
+# Ubuntu/Debian
+sudo apt-get install postgresql-client
+
+# Fedora/RHEL
+sudo dnf install postgresql
+```
+
 ### Docker
 
 Install Docker following the [official instructions](https://docs.docker.com/engine/install/) for your distribution.

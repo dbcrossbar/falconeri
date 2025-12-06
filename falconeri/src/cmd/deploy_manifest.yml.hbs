@@ -12,10 +12,13 @@ spec:
   resources:
     requests:
       storage: "{{config.postgres_storage}}"
-  # You'll need to have an appropriate storage class defined on your cluster.
-  # This is defined by default on GKE, and it will allocated and deallocate
-  # persistent cloud volumes.
-  storageClassName: standard
+  # Storage class is optional. If not specified, uses cluster default.
+  # GKE uses "standard-rwo", k3s uses "local-path", etc.
+  # Note: EKS 1.30+ has no default storage class - you may need to configure one
+  # or use --storage-class-name to specify "gp2" or "gp3" explicitly.
+{{#if config.storage_class_name}}
+  storageClassName: {{config.storage_class_name}}
+{{/if}}
 {{/if}}
 
 ---
