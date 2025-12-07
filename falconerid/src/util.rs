@@ -1,13 +1,17 @@
 //! Various axum-related utilities.
 
+use std::result;
+
 use axum::{
     extract::FromRequestParts,
     http::{request::Parts, StatusCode},
     response::{IntoResponse, Response},
 };
-use falconeri_common::base64::{prelude::BASE64_STANDARD, Engine};
-use falconeri_common::{db, prelude::*};
-use std::result;
+use falconeri_common::{
+    base64::{prelude::BASE64_STANDARD, Engine},
+    db,
+    prelude::*,
+};
 
 /// Shared application state.
 #[derive(Clone)]

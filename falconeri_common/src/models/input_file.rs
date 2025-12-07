@@ -1,7 +1,6 @@
 use diesel_async::RunQueryDsl;
 
-use crate::prelude::*;
-use crate::schema::*;
+use crate::{prelude::*, schema::*};
 
 /// An input file which needs to be downloaded to the worker container.
 #[derive(Associations, Debug, Deserialize, Identifiable, Queryable, Serialize)]

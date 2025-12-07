@@ -73,6 +73,11 @@ check:
 check-clean:
     git diff-index --quiet HEAD --
 
+# Sort and group imports using nightly rustfmt.
+# This groups imports into std/external/local sections and merges imports from the same crate.
+sort-imports:
+    cargo +nightly fmt
+
 # PLEASE DO NOT RUN WITHOUT SIGN-OFF FROM emk. This is not a complete set of
 # things that need to be done for a valid release. Some other things:
 #

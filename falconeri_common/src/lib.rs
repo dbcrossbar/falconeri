@@ -42,11 +42,6 @@ pub mod tracing_support;
 
 /// Common imports used by many modules.
 pub mod prelude {
-    pub use anyhow::{format_err, Context};
-    pub use chrono::{NaiveDateTime, Utc};
-    pub use diesel::{self, prelude::*};
-    pub use diesel_async::AsyncPgConnection;
-    pub use serde::{Deserialize, Serialize};
     pub use std::{
         collections::HashMap,
         fmt,
@@ -54,20 +49,23 @@ pub mod prelude {
         io::Write,
         path::{Path, PathBuf},
     };
+
+    pub use anyhow::{format_err, Context};
+    pub use chrono::{NaiveDateTime, Utc};
+    pub use diesel::{self, prelude::*};
+    pub use diesel_async::AsyncPgConnection;
+    pub use serde::{Deserialize, Serialize};
     pub use tracing::{
         debug, debug_span, error, error_span, info, info_span, instrument, trace,
         trace_span, warn, warn_span,
     };
     pub use uuid::Uuid;
 
-    pub use super::connect_via::ConnectVia;
-    pub use super::models::*;
-    pub use super::{Error, Result};
+    pub use super::{connect_via::ConnectVia, models::*, Error, Result};
 }
 
 /// Error type for this crate's functions.
 pub use anyhow::Error;
-
 /// Result type for this crate's functions.
 pub use anyhow::Result;
 

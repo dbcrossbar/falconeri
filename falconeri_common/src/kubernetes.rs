@@ -1,13 +1,11 @@
 //! Tools for talking to Kubernetes.
 
-use rand::distr::Alphanumeric;
-use rand::{rng, Rng};
+use std::{collections::HashSet, env, iter, process::Stdio};
+
+use rand::{distr::Alphanumeric, rng, Rng};
 use serde::de::{Deserialize, DeserializeOwned};
 use serde_json;
-use std::collections::HashSet;
-use std::{env, iter, process::Stdio};
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
+use tokio::{io::AsyncWriteExt, process::Command};
 
 use crate::prelude::*;
 
@@ -90,9 +88,10 @@ struct Secret<T> {
 /// with `#[serde(with = "base64_encoded_secret_string")]` to automatically
 /// decode Base64-encoded fields.
 pub mod base64_encoded_secret_string {
+    use std::result;
+
     use base64::{prelude::BASE64_STANDARD, Engine};
     use serde::de::{Deserialize, Deserializer, Error as DeError};
-    use std::result;
 
     /// Deserialize a secret represented as a Base64-encoded UTF-8 string.
     pub fn deserialize<'de, D: Deserializer<'de>>(
@@ -113,9 +112,10 @@ pub mod base64_encoded_secret_string {
 /// Use with `#[serde(default, with = "base64_encoded_optional_secret_string")]`
 /// to automatically decode optional Base64-encoded fields.
 pub mod base64_encoded_optional_secret_string {
+    use std::result;
+
     use base64::{prelude::BASE64_STANDARD, Engine};
     use serde::de::{Deserializer, Error as DeError};
-    use std::result;
 
     /// Deserialize an optional secret represented as a Base64-encoded UTF-8 string.
     pub fn deserialize<'de, D: Deserializer<'de>>(

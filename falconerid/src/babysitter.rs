@@ -10,10 +10,13 @@
 
 use std::{panic::AssertUnwindSafe, process, time::Duration};
 
-use falconeri_common::diesel_async::scoped_futures::ScopedFutureExt;
-use falconeri_common::diesel_async::AsyncConnection;
-use falconeri_common::futures_util::FutureExt;
-use falconeri_common::{chrono, db, kubernetes::get_all_job_names, prelude::*};
+use falconeri_common::{
+    chrono, db,
+    diesel_async::{scoped_futures::ScopedFutureExt, AsyncConnection},
+    futures_util::FutureExt,
+    kubernetes::get_all_job_names,
+    prelude::*,
+};
 
 /// Spawn a tokio task and run the babysitter in it. This should run indefinitely.
 #[instrument(skip_all, level = "trace")]

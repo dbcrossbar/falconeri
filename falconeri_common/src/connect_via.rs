@@ -1,8 +1,8 @@
 //! How should we connect to PostgreSQL and `falconerid`?
 
+use std::{future::Future, time::Duration};
+
 use backon::{BlockingRetryable, ExponentialBuilder, Retryable};
-use std::future::Future;
-use std::time::Duration;
 
 use crate::prelude::*;
 

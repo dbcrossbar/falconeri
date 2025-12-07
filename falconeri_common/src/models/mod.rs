@@ -1,7 +1,6 @@
 //! Database models.
 
-use diesel::backend::Backend;
-use diesel::{deserialize, pg::Pg, serialize};
+use diesel::{backend::Backend, deserialize, pg::Pg, serialize};
 
 use crate::prelude::*;
 
@@ -10,10 +9,7 @@ mod input_file;
 mod job;
 mod output_file;
 
-pub use self::datum::*;
-pub use self::input_file::*;
-pub use self::job::*;
-pub use self::output_file::*;
+pub use self::{datum::*, input_file::*, job::*, output_file::*};
 
 /// Custom SQL types.
 pub mod sql_types {

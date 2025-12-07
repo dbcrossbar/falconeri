@@ -3,10 +3,12 @@
 use serde::de::DeserializeOwned;
 use url::Url;
 
-use crate::db;
-use crate::kubernetes::{node_name, pod_name};
-use crate::pipeline::PipelineSpec;
-use crate::prelude::*;
+use crate::{
+    db,
+    kubernetes::{node_name, pod_name},
+    pipeline::PipelineSpec,
+    prelude::*,
+};
 
 /// Request the reservation of a datum.
 #[derive(Debug, Deserialize, Serialize)]

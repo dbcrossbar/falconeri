@@ -1,7 +1,8 @@
 //! The `job wait` subcommand.
 
-use falconeri_common::{prelude::*, rest_api::Client};
 use std::time::Duration;
+
+use falconeri_common::{prelude::*, rest_api::Client};
 
 /// The `job wait` subcommand.
 pub async fn run(job_name: &str) -> Result<()> {

@@ -1,7 +1,6 @@
 //! Human-readable descriptions of an object.
 
-use falconeri_common::handlebars::Handlebars;
-use falconeri_common::prelude::*;
+use falconeri_common::{handlebars::Handlebars, prelude::*};
 
 /// Render the specified textual description, filling in the supplied values
 /// using [Handlebars][].

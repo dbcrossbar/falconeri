@@ -1,8 +1,6 @@
 use diesel_async::RunQueryDsl;
 
-use crate::kubernetes;
-use crate::prelude::*;
-use crate::schema::*;
+use crate::{kubernetes, prelude::*, schema::*};
 
 /// A single chunk of work, consisting of one or more files.
 #[derive(Associations, Debug, Deserialize, Identifiable, Queryable, Serialize)]

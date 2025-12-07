@@ -3,8 +3,7 @@ use diesel::dsl;
 use diesel_async::{scoped_futures::ScopedFutureExt, AsyncConnection, RunQueryDsl};
 use serde_json;
 
-use crate::prelude::*;
-use crate::schema::*;
+use crate::{prelude::*, schema::*};
 
 /// A distributed data processing job.
 #[derive(Debug, Deserialize, Identifiable, Queryable, Serialize)]

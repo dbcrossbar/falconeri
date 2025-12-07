@@ -1,19 +1,22 @@
 //! Support for AWS S3 storage.
 
+use std::{fs, process::Stdio};
+
 use async_trait::async_trait;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde_json;
-use std::{fs, process::Stdio};
 use tokio::process::Command;
 
 use super::CloudStorage;
-use crate::kubernetes::{
-    base64_encoded_optional_secret_string, base64_encoded_secret_string,
-    kubectl_secret,
+use crate::{
+    kubernetes::{
+        base64_encoded_optional_secret_string, base64_encoded_secret_string,
+        kubectl_secret,
+    },
+    prelude::*,
+    secret::Secret,
 };
-use crate::prelude::*;
-use crate::secret::Secret;
 
 /// An S3 secret fetched from Kubernetes. This can be fetched using
 /// `kubernetes_secret`.

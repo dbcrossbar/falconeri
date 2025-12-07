@@ -1,7 +1,6 @@
 //! Convert JSON `"input"` clauses to datums which will be assigned to workers.
 
-use std::future::Future;
-use std::pin::Pin;
+use std::{future::Future, pin::Pin};
 
 use falconeri_common::{
     models::{NewDatum, NewInputFile},

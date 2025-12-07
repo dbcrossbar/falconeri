@@ -4,3 +4,8 @@ max_width = 87
 
 # Switch to short-form field init syntax when possible, for consistency.
 use_field_init_shorthand = true
+
+# Unstable features (require nightly, used by `just sort-imports`)
+unstable_features = true
+group_imports = "StdExternalCrate"
+imports_granularity = "Crate"

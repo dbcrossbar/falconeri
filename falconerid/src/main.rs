@@ -1,18 +1,17 @@
 #![deny(unsafe_code)]
 
+use std::env;
+
 use axum::{
     extract::{Path, Query},
     http::StatusCode,
     routing::{get, patch, post},
     Json, Router,
 };
-use falconeri_common::diesel_async::{
-    scoped_futures::ScopedFutureExt, AsyncConnection,
-};
-use tower_http::limit::RequestBodyLimitLayer;
-
 use falconeri_common::{
-    db, falconeri_common_version,
+    db,
+    diesel_async::{scoped_futures::ScopedFutureExt, AsyncConnection},
+    falconeri_common_version,
     pipeline::PipelineSpec,
     prelude::*,
     rest_api::{
@@ -22,16 +21,18 @@ use falconeri_common::{
     tracing_support::initialize_tracing,
 };
 use serde::Deserialize;
-use std::env;
+use tower_http::limit::RequestBodyLimitLayer;
 
 mod babysitter;
 pub(crate) mod inputs;
 mod start_job;
 mod util;
 
-use crate::babysitter::start_babysitter;
-use crate::start_job::{retry_job, run_job};
-use crate::util::{AppState, DbConn, FalconeridError, FalconeridResult, User};
+use crate::{
+    babysitter::start_babysitter,
+    start_job::{retry_job, run_job},
+    util::{AppState, DbConn, FalconeridError, FalconeridResult, User},
+};
 
 /// Initialize the server at startup (run migrations).
 #[instrument(level = "debug")]

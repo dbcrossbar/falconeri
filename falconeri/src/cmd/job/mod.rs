@@ -1,8 +1,7 @@
 //! The `job` subcommand.
 
 use clap::Subcommand;
-use falconeri_common::serde_json;
-use falconeri_common::{pipeline::PipelineSpec, prelude::*};
+use falconeri_common::{pipeline::PipelineSpec, prelude::*, serde_json};
 
 mod describe;
 mod list;

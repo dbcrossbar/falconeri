@@ -1,7 +1,6 @@
 use diesel_async::RunQueryDsl;
 
-use crate::prelude::*;
-use crate::schema::*;
+use crate::{prelude::*, schema::*};
 
 /// An output file uploaded from a worker.
 #[derive(Associations, Debug, Deserialize, Identifiable, Queryable, Serialize)]

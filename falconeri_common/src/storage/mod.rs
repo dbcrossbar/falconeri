@@ -2,8 +2,7 @@
 
 use async_trait::async_trait;
 
-use crate::prelude::*;
-use crate::secret::Secret;
+use crate::{prelude::*, secret::Secret};
 
 pub mod gs;
 pub mod s3;

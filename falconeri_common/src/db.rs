@@ -1,17 +1,24 @@
 //! Database utilities.
 
-use anyhow::anyhow;
-pub use diesel_async::pooled_connection::deadpool::Object as PooledConnection;
-pub use diesel_async::pooled_connection::deadpool::Pool as AsyncPoolInner;
-use diesel_async::pooled_connection::AsyncDieselConnectionManager;
-use diesel_async::AsyncConnection;
-use diesel_async::AsyncMigrationHarness;
-pub use diesel_async::AsyncPgConnection;
-use diesel_migrations::MigrationHarness;
 use std::{env, fs::read_to_string};
 
-use crate::kubernetes::{base64_encoded_secret_string, kubectl_secret};
-use crate::prelude::*;
+use anyhow::anyhow;
+pub use diesel_async::{
+    pooled_connection::deadpool::{
+        Object as PooledConnection, Pool as AsyncPoolInner,
+    },
+    AsyncPgConnection,
+};
+use diesel_async::{
+    pooled_connection::AsyncDieselConnectionManager, AsyncConnection,
+    AsyncMigrationHarness,
+};
+use diesel_migrations::MigrationHarness;
+
+use crate::{
+    kubernetes::{base64_encoded_secret_string, kubectl_secret},
+    prelude::*,
+};
 
 /// Embed our migrations directly into the executable. We use a
 /// submodule so we can configure warnings.

@@ -1,12 +1,12 @@
 //! Support for Google Cloud Storage.
 
-use async_trait::async_trait;
 use std::{collections::HashSet, fs, io::BufRead, process::Stdio};
+
+use async_trait::async_trait;
 use tokio::process::Command;
 
 use super::CloudStorage;
-use crate::prelude::*;
-use crate::secret::Secret;
+use crate::{prelude::*, secret::Secret};
 
 /// Backend for talking to Google Cloud Storage, currently based on `gsutil`.
 #[derive(Debug)]

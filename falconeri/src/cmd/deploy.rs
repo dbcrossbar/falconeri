@@ -1,10 +1,10 @@
 //! The `deploy` subcommand.
 
-use clap::Args;
-use falconeri_common::base64::{prelude::BASE64_STANDARD, Engine};
 use std::iter;
 
+use clap::Args;
 use falconeri_common::{
+    base64::{prelude::BASE64_STANDARD, Engine},
     kubernetes,
     manifest::render_manifest,
     prelude::*,
