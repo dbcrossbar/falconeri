@@ -85,6 +85,7 @@ For local development setup (Colima on macOS, minikube on Linux), see the [Local
 - `cargo run -p falconeri -- job wait <job-id>`: Wait for job to complete
 - `cargo run -p falconeri -- job list`: List recent jobs
 - `cargo run -p falconeri -- job describe <job-id>`: Describe a job
+    - Lists currrently running and failed datums only, for brevity.
 - `cargo run -p falconeri -- datum describe <datum-id>`: Describe a datum
 
 ## End-to-End Testing
@@ -127,7 +128,7 @@ Then, from the `examples/word-frequencies/` directory, you can run the job:
 
 ```sh
 just delete-results                  # Clean up previous results
-just run                             # Run the job
+just run                             # Run the job (jobs run once, so you'll always need a fresh one to test)
 just results                         # View output
 ```
 

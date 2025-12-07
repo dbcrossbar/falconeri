@@ -8,7 +8,7 @@ mod describe;
 /// `datum` options.
 #[derive(Debug, Subcommand)]
 pub enum Opt {
-    /// Describe a specific job.
+    /// Describe a specific datum.
     #[command(name = "describe")]
     Describe {
         /// The UUID of the datum to describe.

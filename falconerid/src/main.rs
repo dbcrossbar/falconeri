@@ -16,7 +16,8 @@ use falconeri_common::{
     pipeline::PipelineSpec,
     prelude::*,
     rest_api::{
-        DatumPatch, DatumReservationRequest, DatumReservationResponse, OutputFilePatch,
+        DatumDescribeResponse, DatumPatch, DatumReservationRequest,
+        DatumReservationResponse, JobDescribeResponse, OutputFilePatch,
     },
     tracing_support::initialize_tracing,
 };
@@ -82,6 +83,15 @@ async fn get_job_by_name(
     Ok(Json(job))
 }
 
+/// List all jobs.
+async fn list_jobs(
+    _user: User,
+    DbConn(mut conn): DbConn,
+) -> FalconeridResult<Json<Vec<Job>>> {
+    let jobs = Job::list(&mut conn).await?;
+    Ok(Json(jobs))
+}
+
 /// Look up a job and return it as JSON.
 async fn get_job(
     _user: User,
@@ -90,6 +100,24 @@ async fn get_job(
 ) -> FalconeridResult<Json<Job>> {
     let job = Job::find(job_id, &mut conn).await?;
     Ok(Json(job))
+}
+
+/// Get detailed job information for display.
+async fn describe_job(
+    _user: User,
+    DbConn(mut conn): DbConn,
+    Path(job_id): Path<Uuid>,
+) -> FalconeridResult<Json<JobDescribeResponse>> {
+    let job = Job::find(job_id, &mut conn).await?;
+    let datum_status_counts = job.datum_status_counts(&mut conn).await?;
+    let running_datums = job.datums_with_status(Status::Running, &mut conn).await?;
+    let error_datums = job.datums_with_status(Status::Error, &mut conn).await?;
+    Ok(Json(JobDescribeResponse {
+        job,
+        datum_status_counts,
+        running_datums,
+        error_datums,
+    }))
 }
 
 /// Retry a job, and return the new job as JSON.
@@ -167,6 +195,17 @@ async fn patch_datum(
     datum.update_job_status_if_done(&mut conn).await?;
 
     Ok(Json(datum))
+}
+
+/// Get detailed datum information for display.
+async fn describe_datum(
+    _user: User,
+    DbConn(mut conn): DbConn,
+    Path(datum_id): Path<Uuid>,
+) -> FalconeridResult<Json<DatumDescribeResponse>> {
+    let datum = Datum::find(datum_id, &mut conn).await?;
+    let input_files = datum.input_files(&mut conn).await?;
+    Ok(Json(DatumDescribeResponse { datum, input_files }))
 }
 
 /// Create a batch of output files.
@@ -255,13 +294,16 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/version", get(version))
         .route("/jobs", post(post_job).get(get_job_by_name))
+        .route("/jobs/list", get(list_jobs))
         .route("/jobs/{job_id}", get(get_job))
+        .route("/jobs/{job_id}/describe", get(describe_job))
         .route("/jobs/{job_id}/retry", post(job_retry))
         .route(
             "/jobs/{job_id}/reserve_next_datum",
             post(job_reserve_next_datum),
         )
         .route("/datums/{datum_id}", patch(patch_datum))
+        .route("/datums/{datum_id}/describe", get(describe_datum))
         .route(
             "/output_files",
             post(create_output_files).patch(patch_output_files),

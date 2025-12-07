@@ -418,7 +418,7 @@ impl Job {
 }
 
 /// The number of datums with a specified status, plus how many are retryable.
-#[derive(Debug, Queryable, Serialize)]
+#[derive(Debug, Deserialize, Queryable, Serialize)]
 pub struct DatumStatusCount {
     /// The status we're counting.
     pub status: Status,

@@ -52,6 +52,28 @@ pub struct OutputFilePatch {
     pub status: Status,
 }
 
+/// Response for job describe endpoint.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct JobDescribeResponse {
+    /// The job being described.
+    pub job: Job,
+    /// Counts of datums by status.
+    pub datum_status_counts: Vec<DatumStatusCount>,
+    /// Currently running datums.
+    pub running_datums: Vec<Datum>,
+    /// Datums that have errored.
+    pub error_datums: Vec<Datum>,
+}
+
+/// Response for datum describe endpoint.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DatumDescribeResponse {
+    /// The datum being described.
+    pub datum: Datum,
+    /// The input files for this datum.
+    pub input_files: Vec<InputFile>,
+}
+
 /// A client for talking to `falconerid`.
 pub struct Client {
     via: ConnectVia,
@@ -104,6 +126,26 @@ impl Client {
         })
     }
 
+    /// List all jobs.
+    ///
+    /// `GET /jobs/list`
+    #[instrument(level = "trace", skip_all)]
+    pub async fn list_jobs(&self) -> Result<Vec<Job>> {
+        let url = self.url.join("jobs/list")?;
+        self.via
+            .retry_if_appropriate_async(|| async {
+                let resp = self
+                    .client
+                    .get(url.clone())
+                    .basic_auth(&self.username, Some(&self.password))
+                    .send()
+                    .await
+                    .with_context(|| format!("error getting {}", url))?;
+                self.handle_json_response(&url, resp).await
+            })
+            .await
+    }
+
     /// Create a job. This does not automatically retry on network failure,
     /// because it's very expensive and not idempotent (and only called by
     /// `falconeri` and never `falconeri-worker`).
@@ -152,6 +194,26 @@ impl Client {
         url.query_pairs_mut()
             .append_pair("job_name", job_name)
             .finish();
+        self.via
+            .retry_if_appropriate_async(|| async {
+                let resp = self
+                    .client
+                    .get(url.clone())
+                    .basic_auth(&self.username, Some(&self.password))
+                    .send()
+                    .await
+                    .with_context(|| format!("error getting {}", url))?;
+                self.handle_json_response(&url, resp).await
+            })
+            .await
+    }
+
+    /// Get detailed job information for display.
+    ///
+    /// `GET /jobs/{job_id}/describe`
+    #[instrument(skip_all, fields(job_id = %job_id), level = "trace")]
+    pub async fn describe_job(&self, job_id: Uuid) -> Result<JobDescribeResponse> {
+        let url = self.url.join(&format!("jobs/{}/describe", job_id))?;
         self.via
             .retry_if_appropriate_async(|| async {
                 let resp = self
@@ -274,6 +336,29 @@ impl Client {
             .await?;
         *datum = updated_datum;
         Ok(())
+    }
+
+    /// Get detailed datum information for display.
+    ///
+    /// `GET /datums/{datum_id}/describe`
+    #[instrument(skip_all, fields(datum_id = %datum_id), level = "trace")]
+    pub async fn describe_datum(
+        &self,
+        datum_id: Uuid,
+    ) -> Result<DatumDescribeResponse> {
+        let url = self.url.join(&format!("datums/{}/describe", datum_id))?;
+        self.via
+            .retry_if_appropriate_async(|| async {
+                let resp = self
+                    .client
+                    .get(url.clone())
+                    .basic_auth(&self.username, Some(&self.password))
+                    .send()
+                    .await
+                    .with_context(|| format!("error getting {}", url))?;
+                self.handle_json_response(&url, resp).await
+            })
+            .await
     }
 
     /// Create new output files.

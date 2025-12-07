@@ -1,37 +1,19 @@
 //! The `job describe` subcommand.
 
-use falconeri_common::{db, prelude::*};
+use falconeri_common::{prelude::*, rest_api::Client};
 
 use crate::description::render_description;
 
 /// Template for human-readable `describe` output.
 const DESCRIBE_TEMPLATE: &str = include_str!("describe.txt.hbs");
 
-// Convert it into a serializable object.
-#[derive(Serialize)]
-struct Params {
-    job: Job,
-    datum_status_counts: Vec<DatumStatusCount>,
-    running_datums: Vec<Datum>,
-    error_datums: Vec<Datum>,
-}
-
 /// The `job describe` subcommand.
 #[instrument(level = "trace")]
 pub async fn run(job_name: &str) -> Result<()> {
     // Load the data we want to display.
-    let pool = db::async_client_pool().await?;
-    let mut conn = pool.get().await.context("could not get db connection")?;
-    let job = Job::find_by_job_name(job_name, &mut conn).await?;
-    let datum_status_counts = job.datum_status_counts(&mut conn).await?;
-    let running_datums = job.datums_with_status(Status::Running, &mut conn).await?;
-    let error_datums = job.datums_with_status(Status::Error, &mut conn).await?;
-    let params = Params {
-        job,
-        datum_status_counts,
-        running_datums,
-        error_datums,
-    };
+    let client = Client::new(ConnectVia::Proxy).await?;
+    let job = client.find_job_by_name(job_name).await?;
+    let params = client.describe_job(job.id).await?;
 
     // Print the description.
     print!("{}", render_description(DESCRIBE_TEMPLATE, &params)?);
@@ -40,6 +22,8 @@ pub async fn run(job_name: &str) -> Result<()> {
 
 #[test]
 fn render_template() {
+    use falconeri_common::rest_api::JobDescribeResponse;
+
     let job = Job::factory();
     let dsc = |status: Status, count: u64, rerunable_count: u64| DatumStatusCount {
         status,
@@ -58,7 +42,7 @@ fn render_template() {
     error_datum.status = Status::Error;
     error_datum.error_message = Some("Ooops.".to_owned());
     let error_datums = vec![error_datum];
-    let params = Params {
+    let params = JobDescribeResponse {
         job,
         datum_status_counts,
         running_datums,

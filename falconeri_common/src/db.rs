@@ -91,19 +91,6 @@ pub async fn async_pool(pool_size: usize, via: ConnectVia) -> Result<AsyncPool> 
         .context("could not create async database pool")
 }
 
-/// Create a single-connection async pool for CLI client use.
-/// Connects via kubectl proxy.
-///
-/// This is a bit odd: most CLI commands use the REST API, but a few
-/// (job list, job describe, datum describe) connect directly to the
-/// database. We use a pool here just to get the right connection type.
-///
-/// TODO: Consider moving all callers to the REST API.
-#[instrument(level = "trace")]
-pub async fn async_client_pool() -> Result<AsyncPool> {
-    async_pool(1, ConnectVia::Proxy).await
-}
-
 /// Establish a direct async connection to the database.
 ///
 /// This is used for migrations where we need a raw connection rather than
