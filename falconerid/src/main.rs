@@ -22,6 +22,7 @@ use falconeri_common::{
 };
 use serde::Deserialize;
 use tower_http::limit::RequestBodyLimitLayer;
+use utoipa::OpenApi;
 
 mod babysitter;
 pub(crate) mod inputs;
@@ -33,6 +34,50 @@ use crate::{
     start_job::{retry_job, run_job},
     util::{AppState, DbConn, FalconeridError, FalconeridResult, User},
 };
+
+/// OpenAPI specification for CLI-facing endpoints.
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "Falconerid API",
+        version = "2.0.0-alpha",
+        description = "REST API for the Falconeri distributed job runner"
+    ),
+    paths(
+        version,
+        post_job,
+        get_job_by_name,
+        list_jobs,
+        get_job,
+        describe_job,
+        job_retry,
+        describe_datum,
+    ),
+    components(schemas(
+        Job,
+        Datum,
+        DatumStatusCount,
+        InputFile,
+        Status,
+        JobDescribeResponse,
+        DatumDescribeResponse,
+        PipelineSpec,
+        falconeri_common::pipeline::Pipeline,
+        falconeri_common::pipeline::Transform,
+        falconeri_common::pipeline::ParallelismSpec,
+        falconeri_common::pipeline::ResourceRequests,
+        falconeri_common::pipeline::Input,
+        falconeri_common::pipeline::Glob,
+        falconeri_common::pipeline::Egress,
+        falconeri_common::secret::Secret,
+    ))
+)]
+struct ApiDoc;
+
+/// Return the OpenAPI JSON specification.
+async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
+    Json(ApiDoc::openapi())
+}
 
 /// Initialize the server at startup (run migrations).
 #[instrument(level = "debug")]
@@ -54,11 +99,30 @@ async fn initialize_server() -> Result<()> {
 
 /// Return our `falconeri_common` version, which should match the client
 /// exactly (for now).
+///
+/// Used by: CLI, Worker
+#[utoipa::path(
+    get,
+    path = "/version",
+    responses(
+        (status = 200, description = "Server version", body = String)
+    )
+)]
 async fn version() -> String {
     falconeri_common_version().to_string()
 }
 
 /// Create a new job from a JSON pipeline spec.
+///
+/// Used by: CLI (job run)
+#[utoipa::path(
+    post,
+    path = "/jobs",
+    request_body = PipelineSpec,
+    responses(
+        (status = 200, description = "Job created successfully", body = Job)
+    )
+)]
 async fn post_job(
     _user: User,
     DbConn(mut conn): DbConn,
@@ -69,12 +133,23 @@ async fn post_job(
 }
 
 /// Query parameters for get_job_by_name.
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 struct JobNameQuery {
+    /// The Kubernetes job name to look up.
     job_name: String,
 }
 
-/// Look up a job and return it as JSON.
+/// Look up a job by name and return it as JSON.
+///
+/// Used by: CLI (job describe, wait, retry)
+#[utoipa::path(
+    get,
+    path = "/jobs",
+    params(JobNameQuery),
+    responses(
+        (status = 200, description = "Job found", body = Job)
+    )
+)]
 async fn get_job_by_name(
     _user: User,
     DbConn(mut conn): DbConn,
@@ -85,6 +160,15 @@ async fn get_job_by_name(
 }
 
 /// List all jobs.
+///
+/// Used by: CLI (job list)
+#[utoipa::path(
+    get,
+    path = "/jobs/list",
+    responses(
+        (status = 200, description = "List of all jobs", body = Vec<Job>)
+    )
+)]
 async fn list_jobs(
     _user: User,
     DbConn(mut conn): DbConn,
@@ -93,7 +177,19 @@ async fn list_jobs(
     Ok(Json(jobs))
 }
 
-/// Look up a job and return it as JSON.
+/// Look up a job by ID and return it as JSON.
+///
+/// Used by: CLI (job wait), Worker
+#[utoipa::path(
+    get,
+    path = "/jobs/{job_id}",
+    params(
+        ("job_id" = Uuid, Path, description = "The job UUID")
+    ),
+    responses(
+        (status = 200, description = "Job found", body = Job)
+    )
+)]
 async fn get_job(
     _user: User,
     DbConn(mut conn): DbConn,
@@ -104,6 +200,18 @@ async fn get_job(
 }
 
 /// Get detailed job information for display.
+///
+/// Used by: CLI (job describe)
+#[utoipa::path(
+    get,
+    path = "/jobs/{job_id}/describe",
+    params(
+        ("job_id" = Uuid, Path, description = "The job UUID")
+    ),
+    responses(
+        (status = 200, description = "Job description", body = JobDescribeResponse)
+    )
+)]
 async fn describe_job(
     _user: User,
     DbConn(mut conn): DbConn,
@@ -122,6 +230,18 @@ async fn describe_job(
 }
 
 /// Retry a job, and return the new job as JSON.
+///
+/// Used by: CLI (job retry)
+#[utoipa::path(
+    post,
+    path = "/jobs/{job_id}/retry",
+    params(
+        ("job_id" = Uuid, Path, description = "The job UUID to retry")
+    ),
+    responses(
+        (status = 200, description = "New job created from retry", body = Job)
+    )
+)]
 async fn job_retry(
     _user: User,
     DbConn(mut conn): DbConn,
@@ -134,6 +254,8 @@ async fn job_retry(
 
 /// Reserve the next available datum for a job, and return it along with a list
 /// of input files.
+///
+/// Used by: Worker
 async fn job_reserve_next_datum(
     _user: User,
     DbConn(mut conn): DbConn,
@@ -150,6 +272,8 @@ async fn job_reserve_next_datum(
 }
 
 /// Update a datum when it's done.
+///
+/// Used by: Worker
 async fn patch_datum(
     _user: User,
     DbConn(mut conn): DbConn,
@@ -199,6 +323,18 @@ async fn patch_datum(
 }
 
 /// Get detailed datum information for display.
+///
+/// Used by: CLI (datum describe)
+#[utoipa::path(
+    get,
+    path = "/datums/{datum_id}/describe",
+    params(
+        ("datum_id" = Uuid, Path, description = "The datum UUID")
+    ),
+    responses(
+        (status = 200, description = "Datum description", body = DatumDescribeResponse)
+    )
+)]
 async fn describe_datum(
     _user: User,
     DbConn(mut conn): DbConn,
@@ -213,6 +349,8 @@ async fn describe_datum(
 ///
 /// TODO: These include `job_id` and `datum_id` values that might be nicer to
 /// move to our URL at some point.
+///
+/// Used by: Worker
 async fn create_output_files(
     _user: User,
     DbConn(mut conn): DbConn,
@@ -223,6 +361,8 @@ async fn create_output_files(
 }
 
 /// Update a batch of output files.
+///
+/// Used by: Worker
 async fn patch_output_files(
     _user: User,
     DbConn(mut conn): DbConn,
@@ -309,6 +449,8 @@ async fn main() -> Result<()> {
             "/output_files",
             post(create_output_files).patch(patch_output_files),
         )
+        // OpenAPI JSON endpoint for CLI-facing API documentation.
+        .route("/api-docs/openapi.json", get(openapi_json))
         // 50 MB limit to match previous Rocket.toml configuration
         .layer(RequestBodyLimitLayer::new(52_428_800))
         .with_state(state);

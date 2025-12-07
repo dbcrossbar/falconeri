@@ -1,9 +1,12 @@
 use diesel_async::RunQueryDsl;
+use utoipa::ToSchema;
 
 use crate::{prelude::*, schema::*};
 
 /// An input file which needs to be downloaded to the worker container.
-#[derive(Associations, Debug, Deserialize, Identifiable, Queryable, Serialize)]
+#[derive(
+    Associations, Debug, Deserialize, Identifiable, Queryable, Serialize, ToSchema,
+)]
 #[diesel(belongs_to(Datum, foreign_key = datum_id))]
 pub struct InputFile {
     /// The unique ID of this file.

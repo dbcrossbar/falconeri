@@ -2,6 +2,7 @@
 
 use serde::de::DeserializeOwned;
 use url::Url;
+use utoipa::ToSchema;
 
 use crate::{
     db,
@@ -55,7 +56,7 @@ pub struct OutputFilePatch {
 }
 
 /// Response for job describe endpoint.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct JobDescribeResponse {
     /// The job being described.
     pub job: Job,
@@ -68,7 +69,7 @@ pub struct JobDescribeResponse {
 }
 
 /// Response for datum describe endpoint.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct DatumDescribeResponse {
     /// The datum being described.
     pub datum: Datum,

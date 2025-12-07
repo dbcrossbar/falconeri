@@ -1,9 +1,12 @@
 use diesel_async::RunQueryDsl;
+use utoipa::ToSchema;
 
 use crate::{kubernetes, prelude::*, schema::*};
 
 /// A single chunk of work, consisting of one or more files.
-#[derive(Associations, Debug, Deserialize, Identifiable, Queryable, Serialize)]
+#[derive(
+    Associations, Debug, Deserialize, Identifiable, Queryable, Serialize, ToSchema,
+)]
 #[diesel(belongs_to(Job, foreign_key = job_id))]
 pub struct Datum {
     /// The unique ID of this datum.

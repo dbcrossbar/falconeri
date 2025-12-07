@@ -6,13 +6,16 @@
 
 use std::time::Duration;
 
+use schemars::JsonSchema;
+use utoipa::ToSchema;
+
 use crate::{prelude::*, secret::Secret};
 
 /// Represents a pipeline `*.json` file.
 ///
 /// (When editing this, be sure to update `run_job` in `start_job.rs` to include
 /// any new files.)
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PipelineSpec {
     /// Metadata about this pipeline.
@@ -27,6 +30,8 @@ pub struct PipelineSpec {
     pub datum_tries: Option<u32>,
     /// Timeout a running job after this many seconds have elapsed.
     #[serde(default, with = "humantime_serde")]
+    #[schemars(with = "Option<String>")]
+    #[schema(value_type = Option<String>)]
     pub job_timeout: Option<Duration>,
     /// EXTENSION: Kubernetes node selectors describing the nodes where we can
     /// run this job.
@@ -39,7 +44,7 @@ pub struct PipelineSpec {
 }
 
 /// Metadata about this pipeline.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Pipeline {
     /// The name of this pipeline. Also may be used to default various things.
@@ -47,7 +52,7 @@ pub struct Pipeline {
 }
 
 /// Instructions on how to transform the data.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Transform {
     /// The command to run, with arguments.
@@ -71,7 +76,7 @@ pub struct Transform {
 }
 
 /// How much parallelism should we use?
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ParallelismSpec {
     /// The number of workers to run.
@@ -79,7 +84,7 @@ pub struct ParallelismSpec {
 }
 
 /// How many resources should we allocate for each worker?
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceRequests {
     /// The amount of memory to allocate for each worker. A hard limit. Uses
@@ -91,7 +96,7 @@ pub struct ResourceRequests {
 }
 
 /// Specify our input data.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Input {
     /// Input from a cloud storage bucket.
@@ -107,14 +112,18 @@ pub enum Input {
         glob: Glob,
     },
     /// Cross product of two other inputs, producing every possible combination.
+    #[schema(no_recursion)]
     Cross(Vec<Input>),
     /// Union of two other inputs
+    #[schema(no_recursion)]
     Union(Vec<Input>),
 }
 
 /// How to distribute files from an input across workers. We only support two
 /// kinds of glob patterns for now.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize, ToSchema,
+)]
 pub enum Glob {
     /// Put each top-level directory entry (file, subdir) its own datum.
     #[serde(rename = "/*")]
@@ -126,7 +135,7 @@ pub enum Glob {
 }
 
 /// Where to put the data when we're done with it.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct Egress {
     /// A cloud bucket URI in which to place our output data.

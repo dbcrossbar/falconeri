@@ -98,3 +98,9 @@ release: check check-clean publish-image
     git tag v{{VERSION}}
     git push
     git push --tags
+
+# Generate REST API PDF documentation from the running server.
+# Requires: proxy running, npm installed
+rest-docs:
+    curl -s http://localhost:8089/api-docs/openapi.json -o openapi/falconeri-openapi.json
+    npx apibake openapi/falconeri-openapi.json --out openapi/falconeri-restapi.pdf

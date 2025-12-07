@@ -2,11 +2,12 @@ use cast;
 use diesel::dsl;
 use diesel_async::{scoped_futures::ScopedFutureExt, AsyncConnection, RunQueryDsl};
 use serde_json;
+use utoipa::ToSchema;
 
 use crate::{prelude::*, schema::*};
 
 /// A distributed data processing job.
-#[derive(Debug, Deserialize, Identifiable, Queryable, Serialize)]
+#[derive(Debug, Deserialize, Identifiable, Queryable, Serialize, ToSchema)]
 pub struct Job {
     /// The unique ID of this job.
     pub id: Uuid,
@@ -417,7 +418,7 @@ impl Job {
 }
 
 /// The number of datums with a specified status, plus how many are retryable.
-#[derive(Debug, Deserialize, Queryable, Serialize)]
+#[derive(Debug, Deserialize, Queryable, Serialize, ToSchema)]
 pub struct DatumStatusCount {
     /// The status we're counting.
     pub status: Status,

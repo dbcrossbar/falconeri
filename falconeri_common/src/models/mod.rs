@@ -1,6 +1,7 @@
 //! Database models.
 
 use diesel::{backend::Backend, deserialize, pg::Pg, serialize};
+use utoipa::ToSchema;
 
 use crate::prelude::*;
 
@@ -22,16 +23,17 @@ pub mod sql_types {
 /// Possible status values.
 #[derive(
     AsExpression,
-    Debug,
-    Deserialize,
     Clone,
     Copy,
+    Debug,
+    Deserialize,
     Eq,
     FromSqlRow,
     Ord,
     PartialEq,
     PartialOrd,
     Serialize,
+    ToSchema,
 )]
 #[diesel(sql_type = sql_types::Status)]
 #[serde(rename_all = "snake_case")]

@@ -4,6 +4,9 @@
 
 [advisories]
 ignore = [
+    # utoipa-axum -> paste is unmaintained but there's no safe upgrade yet.
+    # https://rustsec.org/advisories/RUSTSEC-2024-0436
+    "RUSTSEC-2024-0436",
 ]
 
 [licenses]

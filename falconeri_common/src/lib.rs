@@ -21,6 +21,7 @@ pub use diesel_async;
 pub use futures_util;
 pub use handlebars;
 pub use rand;
+pub use schemars;
 pub use semver;
 pub use serde;
 pub use serde_json;
