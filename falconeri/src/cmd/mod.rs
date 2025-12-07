@@ -6,3 +6,4 @@ pub mod deploy;
 pub mod job;
 pub mod migrate;
 pub mod proxy;
+pub mod schema;

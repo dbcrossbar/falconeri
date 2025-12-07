@@ -46,6 +46,10 @@ enum Opt {
     #[command(name = "proxy")]
     Proxy,
 
+    /// Output the JSON Schema for pipeline specification files.
+    #[command(name = "schema")]
+    Schema,
+
     /// Undeploy `falconeri`, removing it from the cluster.
     #[command(name = "undeploy")]
     Undeploy {
@@ -67,6 +71,7 @@ async fn main() -> Result<()> {
         Opt::Job { ref cmd } => cmd::job::run(cmd).await,
         Opt::Migrate => cmd::migrate::run().await,
         Opt::Proxy => cmd::proxy::run().await,
+        Opt::Schema => cmd::schema::run(),
         Opt::Undeploy { all } => cmd::deploy::run_undeploy(all).await,
     }
 }
