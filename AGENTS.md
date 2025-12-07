@@ -69,62 +69,101 @@ For local development setup (Colima on macOS, minikube on Linux), see the [Local
 
 ### Docker context (run before `just image`)
 
-- macOS: `docker context use colima`
+- macOS: `docker context use colima` (persistent, in theory)
 - Linux: `eval $(minikube docker-env)` (run in each terminal)
 
 ### Key commands
 
 - `just static-bin`: Build static musl binaries to `target/x86_64-unknown-linux-musl/debug/`
-- `just image`: Build the Docker image (depends on static-bin)
+- `just image`: Build the Docker image (depends on static-bin).
+    - **IMPORTANT:** This creates images on the local Docker daemon with tags that _look_ like remote registry tags. But local deployment uses `imagePullPolicy: Never` to avoid pulling from a registry.
 - `cargo run -p falconeri -- deploy --development`: Deploy in development mode
 - `cargo run -p falconeri -- proxy`: Create proxy connection to cluster
 - `cargo run -p falconeri -- migrate`: Run database schema migrations
-- `kubectl get all`: Check cluster status
+- `kubectl get all`: Check cluster status (very important after deploying)
+- `cargo run -p falconeri -- job run <pipeline-spec.json>`: Run a job
+- `cargo run -p falconeri -- job wait <job-id>`: Wait for job to complete
+- `cargo run -p falconeri -- job list`: List recent jobs
+- `cargo run -p falconeri -- job describe <job-id>`: Describe a job
+- `cargo run -p falconeri -- datum describe <datum-id>`: Describe a datum
 
-## Running the Example Pipeline
+## End-to-End Testing
 
-The `examples/word-frequencies/` directory contains a complete example pipeline:
+Once local Kubernetes is set up and `falconeri` has been deployed to it (see [Local Development](guide/src/local.md) and [Building and Running](guide/src/local/running.md)), you can run end-to-end tests using the word-frequencies example:
 
-1. Set up minikube and deploy falconeri (see above)
-2. Create an S3 bucket with `*.txt` files in a `texts/` prefix
-3. Create a K8s secret with AWS credentials:
-   ```sh
-   kubectl create secret generic s3 \
-       --from-file=AWS_ACCESS_KEY_ID \
-       --from-file=AWS_SECRET_ACCESS_KEY
-   ```
-4. Edit `word-frequencies.json` to point at your bucket
-5. Build the worker image: `just image` (in examples/word-frequencies/)
-6. Start a proxy: `just proxy`
-7. Run the job: `just run`
+### Quick Test (from repo root)
 
-See the guide for complete details.
+In a separate terminal, or as a background task, start the proxy (keep running):
+
+```sh
+cargo run -p falconeri -- proxy
+```
+
+The `word-frequencies` example needs one-time setup in its directory:
+
+```sh
+cd examples/word-frequencies         # Make sure you're in the example dir
+just mc-alias                        # Configure MinIO CLI (one-time)
+just upload                          # Upload test data (one-time)
+```
+
+If you modify `falconerid` code, you can run the following at the top level to restart a previously deployed `falconerid` with the new images:
+
+```sh
+just image                                     # Rebuild Docker image
+kubectl rollout restart deployment/falconerid  # Redeploy to pick up changes
+kubectl rollout status deployment/falconerid   # Wait for restart to complete
+```
+
+If you have modified `falconeri-worker` code, you need to rebuild the static binaries and the worker image (starting at the top level):
+
+```sh
+just static-bin               # Rebuild static binaries
+cd examples/word-frequencies  # Make sure you're in the example dir
+just image                    # Rebuild word-frequencies Docker image
+```
+
+Then, from the `examples/word-frequencies/` directory, you can run the job:
+
+```sh
+just delete-results                  # Clean up previous results
+just run                             # Run the job
+just results                         # View output
+```
+
+The test passes when `just results` shows word frequency counts (e.g., "the 42", "and 28"). For re-runs, use `just delete-results` first.
 
 ## Guide Documentation
 
 The `guide/` directory contains mdBook documentation covering:
 
-- **Installation**: Kubernetes cluster setup, authentication, autoscaling
+- **Installation**: Kubernetes cluster setup, authentication, autoscaling, for both production and local environments
 - **Specification**: Pipeline spec format, resource requests, S3/GCS authentication
 - **Images**: Creating worker Docker images, input/output handling
 - **Commands**: CLI reference (proxy, job run/list/describe/retry, db)
 
 To view: Read the markdown files directly in `guide/src/`. The table of contents is in `guide/src/SUMMARY.md`.
 
-## Environment Configuration
+## Secret Management
 
-You should **never** need to manually configure Kubernetes or cloud storage credentials for development. These are handled via:
+Secrets are generated during the initial deploy, and stored in Kubernetes secrets. Most of them are mounted into appropriate containers normally by the deployment specification. But bucket access credentials are a bit special: They are declared by a specific pipeline spec, and accessed as follows:
 
-- `kubectl` context for Kubernetes access
-- K8s secrets for cloud storage credentials (S3, GCS)
+- `falconerid` reads the pipeline spec, gets the secret names, and access the secrets from Kubernetes at runtime. This allows it to access newly created secrets without redeploying.
+- `falconerid` sets up the worker job spec to mount the secrets as environment variables at runtime, so `falconeri-worker` can find them automatically.
 
-If you encounter credential-related errors, immediately stop and ask the user to help.
+**Development:** The `cargo run -p falconeri -- deploy --development` command sets up a credential named `s3` containing MinIO access keys for the local deployment. 
+
+**Production:** You should **never** need to manually access or configure production credentials. If you encounter errors related to production credentials, immediately stop and ask the user to help.
 
 ## Rust Coding Style
 
 NOTE: This section is aspirational, and we may need to review and migrate existing code over time.
 
 All code will be run through `cargo fmt` to enforce style.
+
+### Centralized Dependencies
+
+A number of dependencies are re-exported from `falconeri_common` to crate to ensure consistent versions. Before adding a new dependency to a `Cargo.toml` file, check to see if it is already available from `falconeri_common`. Other dependencies which can't be re-exported for some reason may still be available via the workspace `Cargo.toml`.
 
 ### Error-handling
 
@@ -136,7 +175,7 @@ IMPORTANT: Never use `unwrap` or `expect` for regular error-handling.
 
 You may use `expect` or `unwrap` ONLY to:
 
-- Represent "can't happen" behavior that indicates a programmer mistake, not a user or runtime error.
+- Represent "can't happen" behavior that indicates a programmer mistake, not a user or runtime error. `expect` is strongly preferred here.
 - Inside unit tests.
 
 ### Logging
