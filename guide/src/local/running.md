@@ -1,6 +1,6 @@
 # Building and Running
 
-Once you have your local Kubernetes cluster running (via [Colima](./mac.md) or [minikube](./linux.md)), follow these steps to build and deploy falconeri.
+Once you have your local Kubernetes cluster running (via Colima or minikube), follow these steps to build and deploy falconeri.
 
 ## Building Images
 
@@ -74,7 +74,7 @@ The `examples/word-frequencies/` directory contains a complete example pipeline 
 
 - Falconeri deployed with `--development` (includes MinIO)
 - Proxy running in another terminal
-- MinIO client (`mc`) installed (see [macOS](./mac.md) or [Linux](./linux.md) setup)
+- MinIO client (`mc`) installed (see your platform's setup section)
 
 ### Building the Example Image
 

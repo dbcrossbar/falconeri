@@ -71,4 +71,4 @@ eval $(minikube docker-env)
 
 ## Next Steps
 
-Once minikube is running, proceed to [Building and Running](./running.md).
+Once minikube is running, proceed to the Building and Running section.

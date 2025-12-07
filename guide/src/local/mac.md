@@ -105,4 +105,4 @@ colima start --kubernetes --arch x86_64 --vm-type=vz --vz-rosetta
 
 ## Next Steps
 
-Once Colima is running, proceed to [Building and Running](./running.md).
+Once Colima is running, proceed to the Building and Running section.

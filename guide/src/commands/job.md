@@ -8,7 +8,7 @@ To run a job using `falconeri`, use the `job run` subcommand:
 falconeri job run $PIPELINE_SPEC_JSON_PATH
 ```
 
-The `$PIPELINE_SPEC_JSON_PATH` should point a file in [pipeline spec JSON](./specification.md) format. This will create all the necessary records for a job in the database, and start a job on the Kubernetes cluster. It will also print out the ID of the new job.
+The `$PIPELINE_SPEC_JSON_PATH` should point to a file in pipeline spec JSON format (see the Job Specification chapter). This will create all the necessary records for a job in the database, and start a job on the Kubernetes cluster. It will also print out the ID of the new job.
 
 ## `job list`
 
