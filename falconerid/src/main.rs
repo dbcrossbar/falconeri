@@ -21,7 +21,7 @@ use falconeri_common::{
     tracing_support::initialize_tracing,
 };
 use serde::Deserialize;
-use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 use utoipa::OpenApi;
 
 mod babysitter;
@@ -451,6 +451,8 @@ async fn main() -> Result<()> {
         )
         // OpenAPI JSON endpoint for CLI-facing API documentation.
         .route("/api-docs/openapi.json", get(openapi_json))
+        // HTTP request/response tracing for debugging.
+        .layer(TraceLayer::new_for_http())
         // 50 MB limit to match previous Rocket.toml configuration
         .layer(RequestBodyLimitLayer::new(52_428_800))
         .with_state(state);
