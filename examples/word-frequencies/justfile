@@ -9,6 +9,11 @@ image:
     cp ../../target/x86_64-unknown-linux-musl/debug/falconeri-worker .
     docker build -t word-frequencies .
 
+# Kill all kubectl port-forward and falconeri proxy processes (useful after rollout restart).
+kill-all-kubectl-port-forwards:
+    pkill -f 'kubectl.*port-forward' || true
+    pkill -f 'falconeri.*proxy' || true
+
 # Set up a proxy.
 proxy:
     cargo run -p falconeri -- proxy
