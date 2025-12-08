@@ -10,7 +10,7 @@ use axum::{
 use falconeri_common::{
     base64::{prelude::BASE64_STANDARD, Engine},
     db, diesel,
-    models::DatumOwnershipError,
+    models::DatumStateError,
     prelude::*,
 };
 
@@ -113,8 +113,8 @@ impl From<Error> for FalconeridError {
     }
 }
 
-impl From<DatumOwnershipError> for FalconeridError {
-    fn from(err: DatumOwnershipError) -> Self {
+impl From<DatumStateError> for FalconeridError {
+    fn from(err: DatumStateError) -> Self {
         FalconeridError::Forbidden(err.to_string())
     }
 }

@@ -1,6 +1,6 @@
 #![deny(unsafe_code)]
 
-use std::env;
+use std::{collections::HashSet, env};
 
 use axum::{
     extract::{Path, Query},
@@ -10,8 +10,10 @@ use axum::{
 };
 use falconeri_common::{
     db,
-    diesel_async::{scoped_futures::ScopedFutureExt, AsyncConnection},
+    diesel::BelongingToDsl,
+    diesel_async::{scoped_futures::ScopedFutureExt, AsyncConnection, RunQueryDsl},
     falconeri_common_version,
+    models::DatumStateError,
     pipeline::PipelineSpec,
     prelude::*,
     rest_api::{
@@ -296,11 +298,15 @@ async fn patch_datum(
     let datum = conn
         .transaction(|conn| {
             async move {
-                // Lock datum and verify ownership (returns 403 if mismatch).
-                let mut datum =
-                    Datum::lock_and_verify_owner(datum_id, &request.pod_name, conn)
-                        .await
-                        .map_err(FalconeridError::from)?;
+                // Lock datum and verify ownership and status (returns 403 if mismatch).
+                let mut datum = Datum::lock_and_verify_owner(
+                    datum_id,
+                    &request.pod_name,
+                    Status::Running,
+                    conn,
+                )
+                .await
+                .map_err(FalconeridError::from)?;
 
                 // We only support a few very specific types of patches.
                 match &patch {
@@ -384,9 +390,9 @@ async fn create_output_files(
     let output_files = conn
         .transaction(|conn| {
             async move {
-                // Lock datum and verify ownership (returns 403 if mismatch).
+                // Lock datum and verify ownership and status (returns 403 if mismatch).
                 let datum =
-                    Datum::lock_and_verify_owner(datum_id, &request.pod_name, conn)
+                    Datum::lock_and_verify_owner(datum_id, &request.pod_name, Status::Running, conn)
                         .await
                         .map_err(FalconeridError::from)?;
 
@@ -400,6 +406,50 @@ async fn create_output_files(
                         uri: f.uri.clone(),
                     })
                     .collect();
+
+                // Check for existing output files (HTTP retry detection).
+                //
+                // This looks like ridiculous overkill, but we've been trying to
+                // debug a rare issue with conflicting output file insertions
+                // that _looked_ imposssible in any sensible state. So now we are
+                // being extremely cautious about reporting weirdness.
+                let existing: Vec<OutputFile> = OutputFile::belonging_to(&datum)
+                    .load(conn)
+                    .await
+                    .context("could not load existing output files")?;
+
+                if !existing.is_empty() {
+                    // Compare URI sets.
+                    let existing_uris: HashSet<&str> = existing.iter().map(|f| f.uri.as_str()).collect();
+                    let new_uris: HashSet<&str> = new_files.iter().map(|f| f.uri.as_str()).collect();
+
+                    if existing_uris == new_uris {
+                        // Exact match - idempotent retry, return existing.
+                        warn!(
+                            datum = %datum.id,
+                            count = existing.len(),
+                            pod_name = %request.pod_name,
+                            "output files already exist with matching URIs (idempotent HTTP retry)"
+                        );
+                        return Ok(existing);
+                    } else {
+                        // URI mismatch - something is wrong.
+                        let only_in_existing: Vec<_> = existing_uris.difference(&new_uris).map(|s| s.to_string()).collect();
+                        let only_in_new: Vec<_> = new_uris.difference(&existing_uris).map(|s| s.to_string()).collect();
+                        error!(
+                            datum = %datum.id,
+                            pod_name = %request.pod_name,
+                            ?only_in_existing,
+                            ?only_in_new,
+                            "output file URI mismatch - existing files don't match request"
+                        );
+                        return Err(DatumStateError::OutputFileMismatch {
+                            datum_id: datum.id,
+                            only_in_existing,
+                            only_in_new,
+                        }.into());
+                    }
+                }
 
                 let output_files = NewOutputFile::insert_all(&new_files, conn).await?;
                 Ok::<_, FalconeridError>(output_files)
@@ -442,11 +492,15 @@ async fn patch_output_files(
     // Apply our updates within a transaction that verifies ownership.
     conn.transaction(|conn| {
         async move {
-            // Lock datum and verify ownership (returns 403 if mismatch).
-            let _datum =
-                Datum::lock_and_verify_owner(datum_id, &request.pod_name, conn)
-                    .await
-                    .map_err(FalconeridError::from)?;
+            // Lock datum and verify ownership and status (returns 403 if mismatch).
+            let _datum = Datum::lock_and_verify_owner(
+                datum_id,
+                &request.pod_name,
+                Status::Running,
+                conn,
+            )
+            .await
+            .map_err(FalconeridError::from)?;
 
             OutputFile::mark_ids_as_done(&done_ids, conn).await?;
             OutputFile::mark_ids_as_error(&error_ids, conn).await?;

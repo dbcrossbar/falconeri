@@ -5,9 +5,9 @@ use utoipa::ToSchema;
 
 use crate::{kubernetes, prelude::*, schema::*};
 
-/// Error type for datum ownership verification.
+/// Error type for datum state verification.
 #[derive(Debug)]
-pub enum DatumOwnershipError {
+pub enum DatumStateError {
     /// The datum was not found.
     NotFound(Uuid),
     /// The pod does not own the datum (possible zombie worker).
@@ -19,15 +19,33 @@ pub enum DatumOwnershipError {
         /// The pod that actually owns the datum (if any).
         actual_pod: Option<String>,
     },
+    /// The datum is not in the expected status.
+    WrongStatus {
+        /// The datum ID.
+        datum_id: Uuid,
+        /// The expected status.
+        expected_status: Status,
+        /// The actual status.
+        actual_status: Status,
+    },
+    /// Output files already exist but URIs don't match the request.
+    OutputFileMismatch {
+        /// The datum ID.
+        datum_id: Uuid,
+        /// URIs that exist in the database but not in the request.
+        only_in_existing: Vec<String>,
+        /// URIs that are in the request but not in the database.
+        only_in_new: Vec<String>,
+    },
 }
 
-impl fmt::Display for DatumOwnershipError {
+impl fmt::Display for DatumStateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DatumOwnershipError::NotFound(id) => {
+            DatumStateError::NotFound(id) => {
                 write!(f, "datum {} not found", id)
             }
-            DatumOwnershipError::NotOwned {
+            DatumStateError::NotOwned {
                 datum_id,
                 expected_pod,
                 actual_pod,
@@ -38,11 +56,33 @@ impl fmt::Display for DatumOwnershipError {
                     datum_id, actual_pod, expected_pod
                 )
             }
+            DatumStateError::WrongStatus {
+                datum_id,
+                expected_status,
+                actual_status,
+            } => {
+                write!(
+                    f,
+                    "datum {} has status {:?}, expected {:?}",
+                    datum_id, actual_status, expected_status
+                )
+            }
+            DatumStateError::OutputFileMismatch {
+                datum_id,
+                only_in_existing,
+                only_in_new,
+            } => {
+                write!(
+                    f,
+                    "datum {} output files mismatch: only in existing {:?}, only in new {:?}",
+                    datum_id, only_in_existing, only_in_new
+                )
+            }
         }
     }
 }
 
-impl std::error::Error for DatumOwnershipError {}
+impl std::error::Error for DatumStateError {}
 
 /// A single chunk of work, consisting of one or more files.
 #[derive(
@@ -189,26 +229,30 @@ impl Datum {
         Ok(())
     }
 
-    /// Lock this datum and verify the requesting pod owns it.
+    /// Lock this datum and verify the requesting pod owns it and it has the
+    /// expected status.
     ///
-    /// Returns the locked datum if ownership matches, or an error if:
+    /// Returns the locked datum if ownership and status match, or an error if:
     /// - The datum doesn't exist
     /// - The pod_name doesn't match (zombie worker detected)
+    /// - The status doesn't match (lifecycle violation)
     ///
     /// Must be called within a transaction.
-    #[instrument(skip_all, fields(datum = %id, pod_name = %pod_name), level = "trace")]
+    #[instrument(skip_all, fields(datum = %id, pod_name = %pod_name, expected_status = ?expected_status), level = "trace")]
     pub async fn lock_and_verify_owner(
         id: Uuid,
         pod_name: &str,
+        expected_status: Status,
         conn: &mut AsyncPgConnection,
-    ) -> Result<Datum, DatumOwnershipError> {
+    ) -> Result<Datum, DatumStateError> {
         let datum: Datum = datums::table
             .find(id)
             .for_update()
             .first(conn)
             .await
-            .map_err(|_| DatumOwnershipError::NotFound(id))?;
+            .map_err(|_| DatumStateError::NotFound(id))?;
 
+        // Check ownership first
         if datum.pod_name.as_deref() != Some(pod_name) {
             error!(
                 datum = %id,
@@ -216,10 +260,26 @@ impl Datum {
                 conflicting_pod_name = ?datum.pod_name,
                 "Pod ownership mismatch - possible zombie worker"
             );
-            return Err(DatumOwnershipError::NotOwned {
+            return Err(DatumStateError::NotOwned {
                 datum_id: id,
                 expected_pod: pod_name.to_string(),
                 actual_pod: datum.pod_name.clone(),
+            });
+        }
+
+        // Check status
+        if datum.status != expected_status {
+            error!(
+                datum = %id,
+                pod_name = %pod_name,
+                expected_status = ?expected_status,
+                actual_status = ?datum.status,
+                "Datum status mismatch - possible zombie or stale request"
+            );
+            return Err(DatumStateError::WrongStatus {
+                datum_id: id,
+                expected_status,
+                actual_status: datum.status,
             });
         }
 
