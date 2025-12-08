@@ -15,8 +15,10 @@ use falconeri_common::{
     pipeline::PipelineSpec,
     prelude::*,
     rest_api::{
-        DatumDescribeResponse, DatumPatch, DatumReservationRequest,
-        DatumReservationResponse, JobDescribeResponse, OutputFilePatch,
+        CreateJobRequest, CreateOutputFilesRequest, DatumDescribeResponse,
+        DatumPatch, DatumResponse, DatumReservationRequest, DatumReservationResponse,
+        JobDescribeResponse, JobResponse, JobsResponse, OutputFilesResponse,
+        UpdateDatumRequest, UpdateOutputFilesRequest,
     },
     tracing_support::initialize_tracing,
 };
@@ -118,18 +120,18 @@ async fn version() -> String {
 #[utoipa::path(
     post,
     path = "/jobs",
-    request_body = PipelineSpec,
+    request_body = CreateJobRequest,
     responses(
-        (status = 200, description = "Job created successfully", body = Job)
+        (status = 200, description = "Job created successfully", body = JobResponse)
     )
 )]
 async fn post_job(
     _user: User,
     DbConn(mut conn): DbConn,
-    Json(pipeline_spec): Json<PipelineSpec>,
-) -> FalconeridResult<Json<Job>> {
-    let job = run_job(&pipeline_spec, &mut conn).await?;
-    Ok(Json(job))
+    Json(request): Json<CreateJobRequest>,
+) -> FalconeridResult<Json<JobResponse>> {
+    let job = run_job(&request.job, &mut conn).await?;
+    Ok(Json(JobResponse { job }))
 }
 
 /// Query parameters for get_job_by_name.
@@ -147,16 +149,16 @@ struct JobNameQuery {
     path = "/jobs",
     params(JobNameQuery),
     responses(
-        (status = 200, description = "Job found", body = Job)
+        (status = 200, description = "Job found", body = JobResponse)
     )
 )]
 async fn get_job_by_name(
     _user: User,
     DbConn(mut conn): DbConn,
     Query(query): Query<JobNameQuery>,
-) -> FalconeridResult<Json<Job>> {
+) -> FalconeridResult<Json<JobResponse>> {
     let job = Job::find_by_job_name(&query.job_name, &mut conn).await?;
-    Ok(Json(job))
+    Ok(Json(JobResponse { job }))
 }
 
 /// List all jobs.
@@ -166,15 +168,15 @@ async fn get_job_by_name(
     get,
     path = "/jobs/list",
     responses(
-        (status = 200, description = "List of all jobs", body = Vec<Job>)
+        (status = 200, description = "List of all jobs", body = JobsResponse)
     )
 )]
 async fn list_jobs(
     _user: User,
     DbConn(mut conn): DbConn,
-) -> FalconeridResult<Json<Vec<Job>>> {
+) -> FalconeridResult<Json<JobsResponse>> {
     let jobs = Job::list(&mut conn).await?;
-    Ok(Json(jobs))
+    Ok(Json(JobsResponse { jobs }))
 }
 
 /// Look up a job by ID and return it as JSON.
@@ -187,16 +189,16 @@ async fn list_jobs(
         ("job_id" = Uuid, Path, description = "The job UUID")
     ),
     responses(
-        (status = 200, description = "Job found", body = Job)
+        (status = 200, description = "Job found", body = JobResponse)
     )
 )]
 async fn get_job(
     _user: User,
     DbConn(mut conn): DbConn,
     Path(job_id): Path<Uuid>,
-) -> FalconeridResult<Json<Job>> {
+) -> FalconeridResult<Json<JobResponse>> {
     let job = Job::find(job_id, &mut conn).await?;
-    Ok(Json(job))
+    Ok(Json(JobResponse { job }))
 }
 
 /// Get detailed job information for display.
@@ -239,17 +241,17 @@ async fn describe_job(
         ("job_id" = Uuid, Path, description = "The job UUID to retry")
     ),
     responses(
-        (status = 200, description = "New job created from retry", body = Job)
+        (status = 200, description = "New job created from retry", body = JobResponse)
     )
 )]
 async fn job_retry(
     _user: User,
     DbConn(mut conn): DbConn,
     Path(job_id): Path<Uuid>,
-) -> FalconeridResult<Json<Job>> {
+) -> FalconeridResult<Json<JobResponse>> {
     let job = Job::find(job_id, &mut conn).await?;
     let new_job = retry_job(&job, &mut conn).await?;
-    Ok(Json(new_job))
+    Ok(Json(JobResponse { job: new_job }))
 }
 
 /// Reserve the next available datum for a job, and return it along with a list
@@ -278,12 +280,13 @@ async fn patch_datum(
     _user: User,
     DbConn(mut conn): DbConn,
     Path(datum_id): Path<Uuid>,
-    Json(patch): Json<DatumPatch>,
-) -> FalconeridResult<Json<Datum>> {
+    Json(request): Json<UpdateDatumRequest>,
+) -> FalconeridResult<Json<DatumResponse>> {
     let mut datum = Datum::find(datum_id, &mut conn).await?;
+    let patch = &request.datum;
 
     // We only support a few very specific types of patches.
-    match &patch {
+    match patch {
         // Set status to `Status::Done`.
         DatumPatch {
             status: Status::Done,
@@ -319,7 +322,7 @@ async fn patch_datum(
     // error).
     datum.update_job_status_if_done(&mut conn).await?;
 
-    Ok(Json(datum))
+    Ok(Json(DatumResponse { datum }))
 }
 
 /// Get detailed datum information for display.
@@ -354,10 +357,11 @@ async fn describe_datum(
 async fn create_output_files(
     _user: User,
     DbConn(mut conn): DbConn,
-    Json(new_output_files): Json<Vec<NewOutputFile>>,
-) -> FalconeridResult<Json<Vec<OutputFile>>> {
-    let created = NewOutputFile::insert_all(&new_output_files, &mut conn).await?;
-    Ok(Json(created))
+    Json(request): Json<CreateOutputFilesRequest>,
+) -> FalconeridResult<Json<OutputFilesResponse>> {
+    let output_files =
+        NewOutputFile::insert_all(&request.output_files, &mut conn).await?;
+    Ok(Json(OutputFilesResponse { output_files }))
 }
 
 /// Update a batch of output files.
@@ -366,12 +370,12 @@ async fn create_output_files(
 async fn patch_output_files(
     _user: User,
     DbConn(mut conn): DbConn,
-    Json(output_file_patches): Json<Vec<OutputFilePatch>>,
+    Json(request): Json<UpdateOutputFilesRequest>,
 ) -> FalconeridResult<StatusCode> {
     // Separate patches by status.
     let mut done_ids = vec![];
     let mut error_ids = vec![];
-    for patch in output_file_patches {
+    for patch in &request.output_files {
         match patch.status {
             Status::Done => done_ids.push(patch.id),
             Status::Error => error_ids.push(patch.id),

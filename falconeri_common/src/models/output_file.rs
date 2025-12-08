@@ -1,9 +1,12 @@
 use diesel_async::RunQueryDsl;
+use utoipa::ToSchema;
 
 use crate::{prelude::*, schema::*};
 
 /// An output file uploaded from a worker.
-#[derive(Associations, Debug, Deserialize, Identifiable, Queryable, Serialize)]
+#[derive(
+    Associations, Debug, Deserialize, Identifiable, Queryable, Serialize, ToSchema,
+)]
 #[diesel(belongs_to(Datum, foreign_key = datum_id))]
 #[diesel(belongs_to(Job, foreign_key = job_id))]
 pub struct OutputFile {
@@ -121,7 +124,7 @@ impl OutputFile {
 }
 
 /// Data required to create a new `OutputFile`.
-#[derive(Debug, Deserialize, Insertable, Serialize)]
+#[derive(Clone, Debug, Deserialize, Insertable, Serialize, ToSchema)]
 #[diesel(table_name = output_files)]
 pub struct NewOutputFile {
     /// The job which created this file.

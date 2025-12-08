@@ -30,7 +30,7 @@ pub struct DatumReservationResponse {
 }
 
 /// Information about a datum that we can update.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct DatumPatch {
     /// The new status for the datum. Must be either `Status::Done` or
     /// `Status::Error`.
@@ -46,7 +46,7 @@ pub struct DatumPatch {
 }
 
 /// Information about an output file that we can update.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct OutputFilePatch {
     /// The ID of the output file to update.
     pub id: Uuid,
@@ -75,6 +75,66 @@ pub struct DatumDescribeResponse {
     pub datum: Datum,
     /// The input files for this datum.
     pub input_files: Vec<InputFile>,
+}
+
+// ============================================================================
+// Rails-style wrapper types for REST API requests and responses.
+// ============================================================================
+
+/// Response wrapper for a single job.
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct JobResponse {
+    /// The job.
+    pub job: Job,
+}
+
+/// Response wrapper for a list of jobs.
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct JobsResponse {
+    /// The list of jobs.
+    pub jobs: Vec<Job>,
+}
+
+/// Response wrapper for a single datum.
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct DatumResponse {
+    /// The datum.
+    pub datum: Datum,
+}
+
+/// Response wrapper for a list of output files.
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct OutputFilesResponse {
+    /// The list of output files.
+    pub output_files: Vec<OutputFile>,
+}
+
+/// Request wrapper for creating a job.
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct CreateJobRequest {
+    /// The pipeline spec to create the job from.
+    pub job: PipelineSpec,
+}
+
+/// Request wrapper for updating a datum.
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct UpdateDatumRequest {
+    /// The datum patch to apply.
+    pub datum: DatumPatch,
+}
+
+/// Request wrapper for creating output files.
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct CreateOutputFilesRequest {
+    /// The output files to create.
+    pub output_files: Vec<NewOutputFile>,
+}
+
+/// Request wrapper for updating output files.
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct UpdateOutputFilesRequest {
+    /// The output file patches to apply.
+    pub output_files: Vec<OutputFilePatch>,
 }
 
 /// A client for talking to `falconerid`.
@@ -135,7 +195,8 @@ impl Client {
     #[instrument(level = "trace", skip_all)]
     pub async fn list_jobs(&self) -> Result<Vec<Job>> {
         let url = self.url.join("jobs/list")?;
-        self.via
+        let response: JobsResponse = self
+            .via
             .retry_if_appropriate_async(|| async {
                 let resp = self
                     .client
@@ -146,7 +207,8 @@ impl Client {
                     .with_context(|| format!("error getting {}", url))?;
                 self.handle_json_response(&url, resp).await
             })
-            .await
+            .await?;
+        Ok(response.jobs)
     }
 
     /// Create a job. This does not automatically retry on network failure,
@@ -157,15 +219,19 @@ impl Client {
     #[instrument(skip_all, level = "trace")]
     pub async fn new_job(&self, pipeline_spec: &PipelineSpec) -> Result<Job> {
         let url = self.url.join("jobs")?;
+        let request = CreateJobRequest {
+            job: pipeline_spec.clone(),
+        };
         let resp = self
             .client
             .post(url.clone())
             .basic_auth(&self.username, Some(&self.password))
-            .json(pipeline_spec)
+            .json(&request)
             .send()
             .await
             .with_context(|| format!("error posting {}", url))?;
-        self.handle_json_response(&url, resp).await
+        let response: JobResponse = self.handle_json_response(&url, resp).await?;
+        Ok(response.job)
     }
 
     /// Fetch a job by ID.
@@ -174,7 +240,8 @@ impl Client {
     #[instrument(skip_all, fields(id = %id), level = "trace")]
     pub async fn job(&self, id: Uuid) -> Result<Job> {
         let url = self.url.join(&format!("jobs/{}", id))?;
-        self.via
+        let response: JobResponse = self
+            .via
             .retry_if_appropriate_async(|| async {
                 let resp = self
                     .client
@@ -185,7 +252,8 @@ impl Client {
                     .with_context(|| format!("error getting {}", url))?;
                 self.handle_json_response(&url, resp).await
             })
-            .await
+            .await?;
+        Ok(response.job)
     }
 
     /// Fetch a job by name.
@@ -197,7 +265,8 @@ impl Client {
         url.query_pairs_mut()
             .append_pair("job_name", job_name)
             .finish();
-        self.via
+        let response: JobResponse = self
+            .via
             .retry_if_appropriate_async(|| async {
                 let resp = self
                     .client
@@ -208,7 +277,8 @@ impl Client {
                     .with_context(|| format!("error getting {}", url))?;
                 self.handle_json_response(&url, resp).await
             })
-            .await
+            .await?;
+        Ok(response.job)
     }
 
     /// Get detailed job information for display.
@@ -246,7 +316,8 @@ impl Client {
             .send()
             .await
             .with_context(|| format!("error posting {}", url))?;
-        self.handle_json_response(&url, resp).await
+        let response: JobResponse = self.handle_json_response(&url, resp).await?;
+        Ok(response.job)
     }
 
     /// Reserve the next available datum to process, and return it along with
@@ -323,21 +394,24 @@ impl Client {
     #[instrument(skip_all, fields(datum = %datum.id), level = "trace")]
     async fn patch_datum(&self, datum: &mut Datum, patch: &DatumPatch) -> Result<()> {
         let url = self.url.join(&format!("datums/{}", datum.id))?;
-        let updated_datum = self
+        let request = UpdateDatumRequest {
+            datum: patch.clone(),
+        };
+        let response: DatumResponse = self
             .via
             .retry_if_appropriate_async(|| async {
                 let resp = self
                     .client
                     .patch(url.clone())
                     .basic_auth(&self.username, Some(&self.password))
-                    .json(patch)
+                    .json(&request)
                     .send()
                     .await
                     .with_context(|| format!("error patching {}", url))?;
                 self.handle_json_response(&url, resp).await
             })
             .await?;
-        *datum = updated_datum;
+        *datum = response.datum;
         Ok(())
     }
 
@@ -373,23 +447,28 @@ impl Client {
         files: &[NewOutputFile],
     ) -> Result<Vec<OutputFile>> {
         let url = self.url.join("output_files")?;
+        let request = CreateOutputFilesRequest {
+            output_files: files.to_vec(),
+        };
         // TODO: We might want finer-grained retry here? This isn't remotely
         // idempotent. Though I suppose if we encounter a "double create", all
         // the retries should just fail until we give up, then we'll eventually
         // fail the datum, allowing it to be retried.
-        self.via
+        let response: OutputFilesResponse = self
+            .via
             .retry_if_appropriate_async(|| async {
                 let resp = self
                     .client
                     .post(url.clone())
                     .basic_auth(&self.username, Some(&self.password))
-                    .json(files)
+                    .json(&request)
                     .send()
                     .await
                     .with_context(|| format!("error posting {}", url))?;
                 self.handle_json_response(&url, resp).await
             })
-            .await
+            .await?;
+        Ok(response.output_files)
     }
 
     /// Update the status of existing output files.
@@ -398,13 +477,16 @@ impl Client {
     #[instrument(level = "trace", skip_all)]
     pub async fn patch_output_files(&self, patches: &[OutputFilePatch]) -> Result<()> {
         let url = self.url.join("output_files")?;
+        let request = UpdateOutputFilesRequest {
+            output_files: patches.to_vec(),
+        };
         self.via
             .retry_if_appropriate_async(|| async {
                 let resp = self
                     .client
                     .patch(url.clone())
                     .basic_auth(&self.username, Some(&self.password))
-                    .json(patches)
+                    .json(&request)
                     .send()
                     .await
                     .with_context(|| format!("error patching {}", url))?;
