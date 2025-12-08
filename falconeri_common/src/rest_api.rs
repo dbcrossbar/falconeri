@@ -55,6 +55,17 @@ pub struct OutputFilePatch {
     pub status: Status,
 }
 
+/// Data for creating an output file via POST.
+///
+/// The datum_id and job_id are provided via the URL path, so this only
+/// contains the URI. Follows the same naming pattern as `DatumPatch` for
+/// PATCH operations.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct OutputFilePost {
+    /// The URI to which we uploaded this file.
+    pub uri: String,
+}
+
 /// Response for job describe endpoint.
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct JobDescribeResponse {
@@ -116,23 +127,33 @@ pub struct CreateJobRequest {
     pub job: PipelineSpec,
 }
 
-/// Request wrapper for updating a datum.
+/// Request wrapper for updating a datum (worker endpoint).
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct UpdateDatumRequest {
+    /// The pod making this request (for ownership verification).
+    pub pod_name: String,
     /// The datum patch to apply.
     pub datum: DatumPatch,
 }
 
-/// Request wrapper for creating output files.
+/// Request wrapper for creating output files (worker endpoint).
+///
+/// Used with `POST /datums/{datum_id}/output_files`.
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct CreateOutputFilesRequest {
+    /// The pod making this request (for ownership verification).
+    pub pod_name: String,
     /// The output files to create.
-    pub output_files: Vec<NewOutputFile>,
+    pub output_files: Vec<OutputFilePost>,
 }
 
-/// Request wrapper for updating output files.
+/// Request wrapper for updating output files (worker endpoint).
+///
+/// Used with `PATCH /datums/{datum_id}/output_files`.
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct UpdateOutputFilesRequest {
+    /// The pod making this request (for ownership verification).
+    pub pod_name: String,
     /// The output file patches to apply.
     pub output_files: Vec<OutputFilePatch>,
 }
@@ -395,6 +416,7 @@ impl Client {
     async fn patch_datum(&self, datum: &mut Datum, patch: &DatumPatch) -> Result<()> {
         let url = self.url.join(&format!("datums/{}", datum.id))?;
         let request = UpdateDatumRequest {
+            pod_name: pod_name()?,
             datum: patch.clone(),
         };
         let response: DatumResponse = self
@@ -438,17 +460,21 @@ impl Client {
             .await
     }
 
-    /// Create new output files.
+    /// Create new output files for a datum.
     ///
-    /// `POST /output_files`
-    #[instrument(level = "trace", skip_all)]
+    /// `POST /datums/{datum_id}/output_files`
+    #[instrument(level = "trace", skip_all, fields(datum = %datum.id))]
     pub async fn create_output_files(
         &self,
-        files: &[NewOutputFile],
+        datum: &Datum,
+        output_files: &[OutputFilePost],
     ) -> Result<Vec<OutputFile>> {
-        let url = self.url.join("output_files")?;
+        let url = self
+            .url
+            .join(&format!("datums/{}/output_files", datum.id))?;
         let request = CreateOutputFilesRequest {
-            output_files: files.to_vec(),
+            pod_name: pod_name()?,
+            output_files: output_files.to_vec(),
         };
         // TODO: We might want finer-grained retry here? This isn't remotely
         // idempotent. Though I suppose if we encounter a "double create", all
@@ -471,13 +497,20 @@ impl Client {
         Ok(response.output_files)
     }
 
-    /// Update the status of existing output files.
+    /// Update the status of existing output files for a datum.
     ///
-    /// PATCH /output_files
-    #[instrument(level = "trace", skip_all)]
-    pub async fn patch_output_files(&self, patches: &[OutputFilePatch]) -> Result<()> {
-        let url = self.url.join("output_files")?;
+    /// `PATCH /datums/{datum_id}/output_files`
+    #[instrument(level = "trace", skip_all, fields(datum = %datum.id))]
+    pub async fn patch_output_files(
+        &self,
+        datum: &Datum,
+        patches: &[OutputFilePatch],
+    ) -> Result<()> {
+        let url = self
+            .url
+            .join(&format!("datums/{}/output_files", datum.id))?;
         let request = UpdateOutputFilesRequest {
+            pod_name: pod_name()?,
             output_files: patches.to_vec(),
         };
         self.via

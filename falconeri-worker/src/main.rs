@@ -4,7 +4,7 @@ use std::{env, fs, io::ErrorKind, process::Stdio, sync::Arc, time::Duration};
 
 use falconeri_common::{
     prelude::*,
-    rest_api::{Client, OutputFilePatch},
+    rest_api::{Client, OutputFilePatch, OutputFilePost},
     storage::CloudStorage,
     tracing_support::initialize_tracing,
 };
@@ -285,7 +285,7 @@ fn reset_work_dir(work_dir: &Path) -> Result<()> {
 /// Upload `/pfs/out` to our output bucket.
 #[instrument(skip_all, fields(job = %job.id, datum = %datum.id), level = "debug")]
 async fn upload_outputs(client: &Client, job: &Job, datum: &Datum) -> Result<()> {
-    // Create records describing the files we're going to upload.
+    // Collect output file info for the files we're going to upload.
     let mut new_output_files = vec![];
     let local_paths = glob::glob("/pfs/out/**/*").context("error listing /pfs/out")?;
     for local_path in local_paths {
@@ -314,14 +314,11 @@ async fn upload_outputs(client: &Client, job: &Job, datum: &Datum) -> Result<()>
         }
         uri.push_str(rel_path_str);
 
-        // Create a database record for the file we're about to upload.
-        new_output_files.push(NewOutputFile {
-            datum_id: datum.id,
-            job_id: job.id,
-            uri: uri.clone(),
-        });
+        new_output_files.push(OutputFilePost { uri });
     }
-    let output_files = client.create_output_files(&new_output_files).await?;
+
+    // Create database records for the files we're about to upload.
+    let output_files = client.create_output_files(datum, &new_output_files).await?;
 
     // Upload all our files in a batch, for maximum performance.
     let storage = <dyn CloudStorage>::for_uri(&job.egress_uri, &[]).await?;
@@ -338,7 +335,7 @@ async fn upload_outputs(client: &Client, job: &Job, datum: &Datum) -> Result<()>
         .iter()
         .map(|f| OutputFilePatch { id: f.id, status })
         .collect::<Vec<_>>();
-    client.patch_output_files(&patches).await?;
+    client.patch_output_files(datum, &patches).await?;
 
     result
 }

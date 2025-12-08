@@ -9,7 +9,8 @@ use axum::{
 };
 use falconeri_common::{
     base64::{prelude::BASE64_STANDARD, Engine},
-    db,
+    db, diesel,
+    models::DatumOwnershipError,
     prelude::*,
 };
 
@@ -72,36 +73,55 @@ impl FromRequestParts<AppState> for DbConn {
         _parts: &mut Parts,
         state: &AppState,
     ) -> result::Result<Self, Self::Rejection> {
-        let conn = state
-            .pool
-            .get()
-            .await
-            .map_err(|e| FalconeridError(format_err!("pool error: {}", e)))?;
+        let conn = state.pool.get().await.map_err(|e| {
+            FalconeridError::Internal(format_err!("pool error: {}", e))
+        })?;
         Ok(DbConn(conn))
     }
 }
 
-/// An error type for `falconerid`. Ideally, this should be an enum with members
-/// like `NotFound` and `Other`, which would allow us to send 404 responses,
-/// etc. But for now it's just a wrapper.
+/// An error type for `falconerid` that maps to appropriate HTTP status codes.
 #[derive(Debug)]
-pub struct FalconeridError(pub Error);
+pub enum FalconeridError {
+    /// Internal server error (500).
+    Internal(Error),
+    /// Forbidden - ownership verification failed (403).
+    Forbidden(String),
+}
 
 impl IntoResponse for FalconeridError {
     fn into_response(self) -> Response {
-        // Log our full error with the error chain using Debug formatting.
-        error!("{:?}", self.0);
-
-        // Put the error message in the payload for now. This might become JSON
-        // in the future. Use Display to avoid leaking backtraces to clients.
-        let payload = format!("{}", self.0);
-        (StatusCode::INTERNAL_SERVER_ERROR, payload).into_response()
+        match self {
+            FalconeridError::Internal(err) => {
+                // Log our full error with the error chain using Debug formatting.
+                error!("{:?}", err);
+                // Use Display to avoid leaking backtraces to clients.
+                let payload = format!("{}", err);
+                (StatusCode::INTERNAL_SERVER_ERROR, payload).into_response()
+            }
+            FalconeridError::Forbidden(msg) => {
+                warn!("Forbidden: {}", msg);
+                (StatusCode::FORBIDDEN, msg).into_response()
+            }
+        }
     }
 }
 
 impl From<Error> for FalconeridError {
     fn from(err: Error) -> Self {
-        FalconeridError(err)
+        FalconeridError::Internal(err)
+    }
+}
+
+impl From<DatumOwnershipError> for FalconeridError {
+    fn from(err: DatumOwnershipError) -> Self {
+        FalconeridError::Forbidden(err.to_string())
+    }
+}
+
+impl From<diesel::result::Error> for FalconeridError {
+    fn from(err: diesel::result::Error) -> Self {
+        FalconeridError::Internal(err.into())
     }
 }
 

@@ -1,7 +1,48 @@
+use std::fmt;
+
 use diesel_async::RunQueryDsl;
 use utoipa::ToSchema;
 
 use crate::{kubernetes, prelude::*, schema::*};
+
+/// Error type for datum ownership verification.
+#[derive(Debug)]
+pub enum DatumOwnershipError {
+    /// The datum was not found.
+    NotFound(Uuid),
+    /// The pod does not own the datum (possible zombie worker).
+    NotOwned {
+        /// The datum ID.
+        datum_id: Uuid,
+        /// The pod that claimed ownership.
+        expected_pod: String,
+        /// The pod that actually owns the datum (if any).
+        actual_pod: Option<String>,
+    },
+}
+
+impl fmt::Display for DatumOwnershipError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DatumOwnershipError::NotFound(id) => {
+                write!(f, "datum {} not found", id)
+            }
+            DatumOwnershipError::NotOwned {
+                datum_id,
+                expected_pod,
+                actual_pod,
+            } => {
+                write!(
+                    f,
+                    "datum {} is owned by {:?}, not {}",
+                    datum_id, actual_pod, expected_pod
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for DatumOwnershipError {}
 
 /// A single chunk of work, consisting of one or more files.
 #[derive(
@@ -146,6 +187,43 @@ impl Datum {
             .await
             .with_context(|| format!("could not load datum {}", self.id))?;
         Ok(())
+    }
+
+    /// Lock this datum and verify the requesting pod owns it.
+    ///
+    /// Returns the locked datum if ownership matches, or an error if:
+    /// - The datum doesn't exist
+    /// - The pod_name doesn't match (zombie worker detected)
+    ///
+    /// Must be called within a transaction.
+    #[instrument(skip_all, fields(datum = %id, pod_name = %pod_name), level = "trace")]
+    pub async fn lock_and_verify_owner(
+        id: Uuid,
+        pod_name: &str,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<Datum, DatumOwnershipError> {
+        let datum: Datum = datums::table
+            .find(id)
+            .for_update()
+            .first(conn)
+            .await
+            .map_err(|_| DatumOwnershipError::NotFound(id))?;
+
+        if datum.pod_name.as_deref() != Some(pod_name) {
+            error!(
+                datum = %id,
+                pod_name = %pod_name,
+                conflicting_pod_name = ?datum.pod_name,
+                "Pod ownership mismatch - possible zombie worker"
+            );
+            return Err(DatumOwnershipError::NotOwned {
+                datum_id: id,
+                expected_pod: pod_name.to_string(),
+                actual_pod: datum.pod_name.clone(),
+            });
+        }
+
+        Ok(datum)
     }
 
     /// Mark this datum as having been successfully processed.

@@ -15,8 +15,8 @@ use falconeri_common::{
     pipeline::PipelineSpec,
     prelude::*,
     rest_api::{
-        CreateJobRequest, CreateOutputFilesRequest, DatumDescribeResponse,
-        DatumPatch, DatumResponse, DatumReservationRequest, DatumReservationResponse,
+        CreateJobRequest, CreateOutputFilesRequest, DatumDescribeResponse, DatumPatch,
+        DatumReservationRequest, DatumReservationResponse, DatumResponse,
         JobDescribeResponse, JobResponse, JobsResponse, OutputFilesResponse,
         UpdateDatumRequest, UpdateOutputFilesRequest,
     },
@@ -282,45 +282,60 @@ async fn patch_datum(
     Path(datum_id): Path<Uuid>,
     Json(request): Json<UpdateDatumRequest>,
 ) -> FalconeridResult<Json<DatumResponse>> {
-    let mut datum = Datum::find(datum_id, &mut conn).await?;
-    let patch = &request.datum;
+    let patch = request.datum.clone();
 
-    // We only support a few very specific types of patches.
-    match patch {
-        // Set status to `Status::Done`.
-        DatumPatch {
-            status: Status::Done,
-            output,
-            error_message: None,
-            backtrace: None,
-        } => {
-            datum.mark_as_done(output, &mut conn).await?;
-        }
+    // Wrap everything in a transaction for the ownership lock.
+    let datum = conn
+        .transaction(|conn| {
+            async move {
+                // Lock datum and verify ownership (returns 403 if mismatch).
+                let mut datum =
+                    Datum::lock_and_verify_owner(datum_id, &request.pod_name, conn)
+                        .await
+                        .map_err(FalconeridError::from)?;
 
-        // Set status to `Status::Error`.
-        DatumPatch {
-            status: Status::Error,
-            output,
-            error_message: Some(error_message),
-            backtrace: Some(backtrace),
-        } => {
-            datum
-                .mark_as_error(output, error_message, backtrace, &mut conn)
-                .await?;
-        }
+                // We only support a few very specific types of patches.
+                match &patch {
+                    // Set status to `Status::Done`.
+                    DatumPatch {
+                        status: Status::Done,
+                        output,
+                        error_message: None,
+                        backtrace: None,
+                    } => {
+                        datum.mark_as_done(output, conn).await?;
+                    }
 
-        // All other combinations are forbidden.
-        other => {
-            return Err(FalconeridError(format_err!(
-                "cannot update datum with {:?}",
-                other
-            )));
-        }
-    }
+                    // Set status to `Status::Error`.
+                    DatumPatch {
+                        status: Status::Error,
+                        output,
+                        error_message: Some(error_message),
+                        backtrace: Some(backtrace),
+                    } => {
+                        datum
+                            .mark_as_error(output, error_message, backtrace, conn)
+                            .await?;
+                    }
 
-    // If there are no more datums, mark the job as finished (either done or
-    // error).
-    datum.update_job_status_if_done(&mut conn).await?;
+                    // All other combinations are forbidden.
+                    other => {
+                        return Err(FalconeridError::Internal(format_err!(
+                            "cannot update datum with {:?}",
+                            other
+                        )));
+                    }
+                }
+
+                // If there are no more datums, mark the job as finished (either
+                // done or error).
+                datum.update_job_status_if_done(conn).await?;
+
+                Ok::<_, FalconeridError>(datum)
+            }
+            .scope_boxed()
+        })
+        .await?;
 
     Ok(Json(DatumResponse { datum }))
 }
@@ -348,28 +363,51 @@ async fn describe_datum(
     Ok(Json(DatumDescribeResponse { datum, input_files }))
 }
 
-/// Create a batch of output files.
-///
-/// TODO: These include `job_id` and `datum_id` values that might be nicer to
-/// move to our URL at some point.
+/// Create a batch of output files for a datum.
 ///
 /// Used by: Worker
 async fn create_output_files(
     _user: User,
     DbConn(mut conn): DbConn,
+    Path(datum_id): Path<Uuid>,
     Json(request): Json<CreateOutputFilesRequest>,
 ) -> FalconeridResult<Json<OutputFilesResponse>> {
-    let output_files =
-        NewOutputFile::insert_all(&request.output_files, &mut conn).await?;
+    let output_files = conn
+        .transaction(|conn| {
+            async move {
+                // Lock datum and verify ownership (returns 403 if mismatch).
+                let datum =
+                    Datum::lock_and_verify_owner(datum_id, &request.pod_name, conn)
+                        .await
+                        .map_err(FalconeridError::from)?;
+
+                // Build NewOutputFile with job_id from datum.
+                let new_files: Vec<NewOutputFile> = request
+                    .output_files
+                    .iter()
+                    .map(|f| NewOutputFile {
+                        job_id: datum.job_id,
+                        datum_id: datum.id,
+                        uri: f.uri.clone(),
+                    })
+                    .collect();
+
+                let output_files = NewOutputFile::insert_all(&new_files, conn).await?;
+                Ok::<_, FalconeridError>(output_files)
+            }
+            .scope_boxed()
+        })
+        .await?;
     Ok(Json(OutputFilesResponse { output_files }))
 }
 
-/// Update a batch of output files.
+/// Update a batch of output files for a datum.
 ///
 /// Used by: Worker
 async fn patch_output_files(
     _user: User,
     DbConn(mut conn): DbConn,
+    Path(datum_id): Path<Uuid>,
     Json(request): Json<UpdateOutputFilesRequest>,
 ) -> FalconeridResult<StatusCode> {
     // Separate patches by status.
@@ -380,7 +418,7 @@ async fn patch_output_files(
             Status::Done => done_ids.push(patch.id),
             Status::Error => error_ids.push(patch.id),
             _ => {
-                return Err(FalconeridError(format_err!(
+                return Err(FalconeridError::Internal(format_err!(
                     "cannot patch output file with {:?}",
                     patch
                 )));
@@ -388,12 +426,18 @@ async fn patch_output_files(
         }
     }
 
-    // Apply our updates.
+    // Apply our updates within a transaction that verifies ownership.
     conn.transaction(|conn| {
         async move {
+            // Lock datum and verify ownership (returns 403 if mismatch).
+            let _datum =
+                Datum::lock_and_verify_owner(datum_id, &request.pod_name, conn)
+                    .await
+                    .map_err(FalconeridError::from)?;
+
             OutputFile::mark_ids_as_done(&done_ids, conn).await?;
             OutputFile::mark_ids_as_error(&error_ids, conn).await?;
-            Ok::<_, Error>(())
+            Ok::<_, FalconeridError>(())
         }
         .scope_boxed()
     })
@@ -450,7 +494,7 @@ async fn main() -> Result<()> {
         .route("/datums/{datum_id}", patch(patch_datum))
         .route("/datums/{datum_id}/describe", get(describe_datum))
         .route(
-            "/output_files",
+            "/datums/{datum_id}/output_files",
             post(create_output_files).patch(patch_output_files),
         )
         // OpenAPI JSON endpoint for CLI-facing API documentation.
