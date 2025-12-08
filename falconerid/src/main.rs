@@ -258,6 +258,7 @@ async fn job_retry(
 /// of input files.
 ///
 /// Used by: Worker
+#[instrument(skip_all, fields(job = %job_id, pod_name = %request.pod_name), level = "debug")]
 async fn job_reserve_next_datum(
     _user: User,
     DbConn(mut conn): DbConn,
@@ -270,12 +271,18 @@ async fn job_reserve_next_datum(
         .await?;
     let result = reserved
         .map(|(datum, input_files)| DatumReservationResponse { datum, input_files });
+    if let Some(ref res) = result {
+        debug!(datum = %res.datum.id, "reserved datum");
+    } else {
+        debug!("no datums available to reserve");
+    }
     Ok(Json(result))
 }
 
 /// Update a datum when it's done.
 ///
 /// Used by: Worker
+#[instrument(skip_all, fields(datum = %datum_id, pod_name = %request.pod_name), level = "debug")]
 async fn patch_datum(
     _user: User,
     DbConn(mut conn): DbConn,
@@ -283,6 +290,7 @@ async fn patch_datum(
     Json(request): Json<UpdateDatumRequest>,
 ) -> FalconeridResult<Json<DatumResponse>> {
     let patch = request.datum.clone();
+    debug!(status = ?patch.status, "updating datum");
 
     // Wrap everything in a transaction for the ownership lock.
     let datum = conn
@@ -366,6 +374,7 @@ async fn describe_datum(
 /// Create a batch of output files for a datum.
 ///
 /// Used by: Worker
+#[instrument(skip_all, fields(datum = %datum_id, pod_name = %request.pod_name), level = "debug")]
 async fn create_output_files(
     _user: User,
     DbConn(mut conn): DbConn,
@@ -398,12 +407,14 @@ async fn create_output_files(
             .scope_boxed()
         })
         .await?;
+    debug!(count = output_files.len(), "created output files");
     Ok(Json(OutputFilesResponse { output_files }))
 }
 
 /// Update a batch of output files for a datum.
 ///
 /// Used by: Worker
+#[instrument(skip_all, fields(datum = %datum_id, pod_name = %request.pod_name), level = "debug")]
 async fn patch_output_files(
     _user: User,
     DbConn(mut conn): DbConn,
@@ -425,6 +436,8 @@ async fn patch_output_files(
             }
         }
     }
+    let done_count = done_ids.len();
+    let error_count = error_ids.len();
 
     // Apply our updates within a transaction that verifies ownership.
     conn.transaction(|conn| {
@@ -443,6 +456,11 @@ async fn patch_output_files(
     })
     .await?;
 
+    debug!(
+        done = done_count,
+        error = error_count,
+        "patched output files"
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
