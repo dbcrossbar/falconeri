@@ -36,10 +36,13 @@ impl ConnectVia {
 
     /// Create a backoff configuration matching our previous behavior.
     fn backoff_config() -> ExponentialBuilder {
+        // Retry for ~14 minutes total. This approximates the old `backoff` crate's
+        // 15-minute default. There's nothing special about this value - it may
+        // need tuning based on operational experience.
         ExponentialBuilder::default()
             .with_min_delay(Duration::from_millis(500))
             .with_jitter()
-            .without_max_times()
+            .with_max_times(20)
     }
 
     /// Run the function `f`. If `self.should_retry_by_default()` is true, retry
