@@ -12,3 +12,4 @@
   - [Connecting](./commands/connecting.md)
   - [Running jobs](./commands/job.md)
   - [Accessing the database](./commands/db.md)
+- [Job Lifecycle](./job-lifecycle.md)

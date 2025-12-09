@@ -3,7 +3,7 @@
 Here is a sample job specification:
 
 ```json
-{{#include ../../falconeri_common/src/example_pipeline_spec.json}}
+{{#include ../../examples/word-frequencies/word-frequencies.json}}
 ```
 
 Some notes:

@@ -1,13 +1,12 @@
 [book]
 authors = ["Eric Kidd"]
-multilingual = false
 src = "src"
-title = "falconeri Distributed batch processing using Kubernetes"
+title = "falconeri: Distributed batch processing using Kubernetes"
 
 [output.html]
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
 
-[output.typst-pdf]
-pdf = true
-custom-template = "template.typ"
-section-number = true
-chapter-no-pagebreak = false
+[output.pdf]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

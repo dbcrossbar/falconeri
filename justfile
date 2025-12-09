@@ -42,11 +42,16 @@ set-version NEW_VERSION:
 static-bin:
     cargo build --target {{MUSL_TARGET}} {{ if MODE == "release" { "--release" } else { "" } }}
 
-# Create a `gh-pages` directory with our "GitHub pages" documentation.
-gh-pages:
+# Build the guide (HTML + PDF).
+guide:
     cd guide && mdbook build
+    mv guide/book/pdf/output.pdf guide/book/pdf/falconeri-guide.pdf
+
+# Create a `gh-pages` directory with our "GitHub pages" documentation.
+gh-pages: guide
     rm -rf gh-pages
-    mv guide/book gh-pages
+    mv guide/book/html gh-pages
+    cp guide/book/pdf/falconeri-guide.pdf gh-pages/
 
 # Our `falconeri` Docker image.
 image: static-bin
