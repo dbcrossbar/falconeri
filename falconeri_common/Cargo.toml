@@ -21,7 +21,7 @@ humantime-serde = "1.0.1"
 lazy_static = "1.0.2"
 rand = "0.9"
 regex = "1.0.2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+reqwest = { version = "0.13", features = ["json"] }
 semver = "1.0.4"
 serde.workspace = true
 serde_json = "1.0"
