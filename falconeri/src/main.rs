@@ -1,7 +1,7 @@
 #![deny(unsafe_code)]
 
 use clap::Parser;
-use falconeri_common::prelude::*;
+use falconeri_common::{prelude::*, tracing_support::initialize_tracing};
 
 mod cmd;
 mod description;
@@ -61,6 +61,7 @@ enum Opt {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    initialize_tracing();
     let opt = Opt::parse();
     debug!("Args: {:?}", opt);
 

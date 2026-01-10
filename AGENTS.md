@@ -116,12 +116,7 @@ kubectl rollout restart deployment/falconerid  # Redeploy to pick up changes
 kubectl rollout status deployment/falconerid   # Wait for restart to complete
 ```
 
-After a rollout restart, you'll need to restart the proxy since the old port-forwards are stale:
-
-```sh
-just -f examples/word-frequencies/justfile kill-all-kubectl-port-forwards
-cargo run -p falconeri -- proxy              # Restart the proxy
-```
+After a rollout restart, the proxy will automatically reconnect to the new pods (you'll see reconnection messages in the logs).
 
 If you have modified `falconeri-worker` code, you need to rebuild the static binaries and the worker image (starting at the top level):
 

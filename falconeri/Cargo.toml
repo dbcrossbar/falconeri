@@ -10,5 +10,5 @@ clap = { version = "4", features = ["derive"] }
 falconeri_common = { path = "../falconeri_common" }
 prettytable-rs = "0.10.0"
 serde.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "signal", "time"] }
 tracing.workspace = true
