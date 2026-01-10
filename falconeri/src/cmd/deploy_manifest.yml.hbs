@@ -202,6 +202,8 @@ spec:
           value: "{{config.falconerid_pool_size}}"
         - name: RUST_LOG
           value: "{{config.falconerid_log_level}}"
+        - name: FALCONERI_USE_LOCAL_IMAGE
+          value: "{{config.use_local_image}}"
         resources:
           requests:
             cpu: "{{config.falconerid_cpu}}"
