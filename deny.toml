@@ -13,7 +13,21 @@ ignore = [
 # Allow common non-restrictive licenses. ISC is used for various DNS and crypto
 # things, and it's a minimally restrictive open source license.
 # Licenses not in this list will be denied (including copyleft and AGPL).
-allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "BSD-2-Clause", "ISC", "Zlib", "Unicode-3.0"]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    # OpenSSL license is used by aws-lc-sys (via ring/rustls). It's a permissive
+    # license similar to BSD, just with an advertising clause.
+    "OpenSSL",
+    # CDLA-Permissive-2.0 is used by webpki-root-certs for Mozilla root CA data.
+    # It's a permissive data license appropriate for certificate data.
+    "CDLA-Permissive-2.0",
+]
 
 [[licenses.clarify]]
 # Ring has a messy license.
@@ -53,8 +67,8 @@ skip-tree = [
     { name = "wasi" },
     # ring and prettytable-rs pull in older getrandom via redox_users
     { name = "getrandom", version = "0.2" },
-    # ring uses windows-sys 0.52; socket2 uses 0.60; affects Windows only
-    { name = "windows-sys", version = "0.52" },
+    # jni uses windows-sys 0.45; other deps use 0.61; affects Windows only
+    { name = "windows-sys", version = "0.45" },
     { name = "windows-sys", version = "0.60" },
 ]
 

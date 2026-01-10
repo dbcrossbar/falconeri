@@ -21,7 +21,7 @@ For all setups, you will also need:
 - `kubectl`, compatible with your version of Kubernetes.
 - `falconeri`, which you should be able to find on the [releases page][releases].
 
-[releases]: https://github.com/faradayio/falconeri/releases
+[releases]: https://github.com/dbcrossbar/falconeri/releases
 
 ## Authenticating with your cluster
 
@@ -104,9 +104,9 @@ falconeri migrate
 
 ## Setting up an HTTP ingress
 
-`falconerid` provides a simple REST API, allowing it to be used as a service by other applications. (This is not documented yet, but you could look at `faraday_common/src/rest_api.rs` for the details.) Within a Kubernetes cluster, you should be able to access the HTTP endpoint associated with `service/falconeri`.
+`falconerid` provides a [REST API](./rest-api.md) for programmatic access. Within a Kubernetes cluster, you can access it via `http://falconerid:8089`.
 
-You can also create a Kubernetes `Ingress` resource which exposes `falconerid` from outside the cluster and binds a DNS name to it. For example, using [aws-alb-ingress-controller][], you could expose `falconerid` as follows (untested):
+You can also create a Kubernetes `Ingress` resource which exposes `falconerid` from outside the cluster and binds a DNS name to it. This is not especially recommended, but if you wanted to, here's where to start. Using [aws-alb-ingress-controller][], you could expose `falconerid` as follows (untested):
 
 ```yaml
 ---
@@ -146,6 +146,6 @@ spec:
               servicePort: 8089
 ```
 
-Note that if you make `falconerid` available over the internet, you **must** set up HTTPS certificates for your load balancer.
+**SECURITY WARNING:** Note that if you make `falconerid` available over the internet, you **must** set up HTTPS certificates for your load balancer. And you should audit the authentication system to make sure it meets your actual security requirements.
 
 [aws-alb-ingress-controller]: https://github.com/kubernetes-sigs/aws-alb-ingress-controller/

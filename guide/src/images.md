@@ -36,4 +36,4 @@ You can install `falconeri-worker` by downloading the latest [release][] and cop
 
 TODO: Add example of installing `falconeri-worker`.
 
-[release]: https://github.com/faradayio/falconeri/
+[release]: https://github.com/dbcrossbar/falconeri/releases

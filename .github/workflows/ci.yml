@@ -4,10 +4,10 @@ name: CI
 # request events but only for the main branch.
 on:
   push:
-    # Run on the main branch.
+    # Run on the main branch and ci/* branches for testing.
     branches:
       - main
-      - ci
+      - "ci/**"
     tags:
       - "v*"
   pull_request:
@@ -26,13 +26,13 @@ jobs:
       upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - name: Extract release version
         id: extract_release_version
         run: |
           release_version="$(echo '${{ github.ref }}' | sed 's,^.*/\([^/]*\)$,\1,; s,^v,,' )"
-          echo Release version: $release_version
-          echo "::set-output name=release_version::$release_version"
+          echo "Release version: $release_version"
+          echo "release_version=$release_version" >> "$GITHUB_OUTPUT"
       - name: Extract release body from CHANGELOG.md
         id: extract_release_body
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
@@ -58,7 +58,7 @@ jobs:
           body_path: RELEASE_BODY.md
 
   # We use a matrix to run our build on every supported platform.
-  release:
+  build:
     name: "Build"
 
     needs:
@@ -75,30 +75,54 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          # We track latest stable Rust instead of hardcoding it because it
-          # virtually never breaks old code.
-          toolchain: stable
           components: rustfmt, clippy
-          target: ${{ matrix.target }}
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v2
-      - name: Check source formatting and warnings
-        run: |
-          cargo fmt -- --check
-          cargo clippy -- -D warnings
-      - name: Test
-        run: |
-          cargo test
-      - name: Build release
+          targets: ${{ matrix.target }}
+
+      - name: Install musl-tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Check source formatting
+        run: cargo fmt -- --check
+
+      - name: Run cargo deny
+        run: cargo deny check
+
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Run tests
+        run: cargo test --all
+
+      - name: Build release binaries
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Upload binaries as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/falconeri
+            target/${{ matrix.target }}/release/falconerid
+            target/${{ matrix.target }}/release/falconeri-worker
+          if-no-files-found: error
+
+      - name: Package release
         id: build_release
         run: |
-          ./build-release falconeri ${{ needs.create_release.outputs.release_version }}_${{ matrix.target }}
+          # Create zip with CLI binary (falconeri) for release download
           release_file=falconeri_${{ needs.create_release.outputs.release_version }}_${{ matrix.target }}.zip
-          echo "::set-output name=release_file::$release_file"
+          zip -j "$release_file" target/${{ matrix.target }}/release/falconeri
+          echo "release_file=$release_file" >> "$GITHUB_OUTPUT"
+
       - name: Upload Release Asset
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         uses: actions/upload-release-asset@v1
@@ -109,3 +133,42 @@ jobs:
           asset_path: ./${{ steps.build_release.outputs.release_file }}
           asset_name: ${{ steps.build_release.outputs.release_file }}
           asset_content_type: application/zip
+
+  # Build and publish Docker image
+  docker:
+    name: "Docker Image"
+    needs: [create_release, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries-x86_64-unknown-linux-musl
+          path: target/x86_64-unknown-linux-musl/release/
+
+      - name: Make binaries executable
+        run: chmod +x target/x86_64-unknown-linux-musl/release/*
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            --build-arg MODE=release \
+            --build-arg MUSL_TARGET=x86_64-unknown-linux-musl \
+            -t ghcr.io/dbcrossbar/falconeri:${{ needs.create_release.outputs.release_version }} .
+
+      - name: Push Docker image
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        run: docker push ghcr.io/dbcrossbar/falconeri:${{ needs.create_release.outputs.release_version }}

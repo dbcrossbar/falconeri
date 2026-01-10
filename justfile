@@ -8,8 +8,8 @@
 #
 # 1. Run `just set-version 0.x.y-alpha.z`, where `0.x.y` will be the next
 #    release.
-# 2. Run `just publish-image`.
-# 3. Run `cargo run -p falconeri -- deploy` to update `falconerid`.
+# 2. Push a tag (e.g., `git tag v0.x.y-alpha.z && git push --tags`) to trigger
+#    CI, which will publish the Docker image to ghcr.io/dbcrossbar/falconeri.
 
 # This should be either "debug" or "release". You can pass `mode=release` on
 # the command line to perform a release build.
@@ -53,19 +53,12 @@ gh-pages: guide
     mv guide/book/html gh-pages
     cp guide/book/pdf/falconeri-guide.pdf gh-pages/
 
-# Our `falconeri` Docker image.
+# Our `falconeri` Docker image (for local development/testing).
 image: static-bin
     docker build \
         --build-arg MODE={{MODE}} \
         --build-arg MUSL_TARGET={{MUSL_TARGET}} \
-        -t faraday/falconeri:{{VERSION}} .
-
-# This will publish our image to Docker Hub. Obviously, this requires an
-# authorized account.
-#
-# Before doing this, update version in _all_ Cargo.toml files to a new version.
-publish-image: image
-    docker push faraday/falconeri:{{VERSION}}
+        -t ghcr.io/dbcrossbar/falconeri:{{VERSION}} .
 
 # Check to make sure that we're in releasable shape.
 check:
@@ -90,16 +83,12 @@ sort-imports:
 #    format.
 # 2. We must follow an as-yet-incomplete semver policy.
 #
-# If you need to make an internal testing release, you should instead:
+# For internal testing releases, use:
 #
 #     just set-version x.y.z-alpha.n
-#     just publish-image
+#     # Commit the version bump, then push a tag to trigger CI
 #
-# Call this as:
-#
-#     just MODE=release release
-#
-release: check check-clean publish-image
+release: check check-clean
     git tag v{{VERSION}}
     git push
     git push --tags

@@ -13,3 +13,4 @@
   - [Running jobs](./commands/job.md)
   - [Accessing the database](./commands/db.md)
 - [Job Lifecycle](./job-lifecycle.md)
+- [REST API](./rest-api.md)
