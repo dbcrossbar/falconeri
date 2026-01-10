@@ -301,3 +301,11 @@ pub fn node_name() -> Result<String> {
 pub fn pod_name() -> Result<String> {
     env::var("FALCONERI_POD_NAME").context("couldn't get FALCONERI_POD_NAME")
 }
+
+/// Check if we should use local (never-pull) images for init containers.
+/// Set via FALCONERI_USE_LOCAL_IMAGE environment variable during deployment.
+pub fn use_local_image() -> bool {
+    env::var("FALCONERI_USE_LOCAL_IMAGE")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+}

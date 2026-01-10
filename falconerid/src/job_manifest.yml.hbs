@@ -33,13 +33,29 @@ spec:
 {{#each pipeline_spec.node_selector}}
         "{{@key}}": "{{this}}"
 {{/each}}
+      initContainers:
+      - name: copy-worker
+        image: "{{falconeri_image}}"
+{{#if use_local_image}}
+        imagePullPolicy: Never
+{{/if}}
+        command: ["sh", "-c", "cp /usr/local/bin/falconeri-worker /falconeri/falconeri-worker && chmod +x /falconeri/falconeri-worker"]
+        volumeMounts:
+        - mountPath: /falconeri
+          name: falconeri-bin
+        resources:
+          requests:
+            cpu: "10m"
+            memory: "16Mi"
+          limits:
+            memory: "16Mi"
       containers:
       - name: worker
         image: "{{pipeline_spec.transform.image}}"
 {{#if pipeline_spec.transform.image_pull_policy}}
         imagePullPolicy: "{{pipeline_spec.transform.image_pull_policy}}"
 {{/if}}
-        command: ["/usr/local/bin/falconeri-worker", "{{job.id}}"]
+        command: ["/falconeri/falconeri-worker", "{{job.id}}"]
         resources:
           requests:
             memory: "{{pipeline_spec.resource_requests.memory}}"
@@ -82,6 +98,8 @@ spec:
           name: pfs
         - mountPath: /scratch
           name: scratch
+        - mountPath: /falconeri
+          name: falconeri-bin
 {{#each pipeline_spec.transform.secrets}}
 {{#if mount_path}}
         - mountPath: "{{mount_path}}"
@@ -93,6 +111,8 @@ spec:
       - name: pfs
         emptyDir: {}
       - name: scratch
+        emptyDir: {}
+      - name: falconeri-bin
         emptyDir: {}
       - name: secrets
         secret:

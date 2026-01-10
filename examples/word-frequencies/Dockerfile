@@ -8,4 +8,4 @@ RUN apt-get update && \
     apt-get clean && rm -rf /var/lib/apt/lists/* && \
     pip3 install awscli --upgrade
 
-ADD falconeri-worker word-frequencies.sh /usr/local/bin/
+ADD word-frequencies.sh /usr/local/bin/
