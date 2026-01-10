@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0-alpha.2] - 2026-01-10
+
+### Added
+
+- Added `falconeri` binaries for Apple Silicon (aarch64-apple-darwin). These are unsigned for now.
+
 ## [2.0.0-alpha.1] - 2026-01-10
 
 ### Added
