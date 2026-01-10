@@ -7,19 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0-alpha.1] - 2026-01-10
+
+### Added
+
+- A new `falconeri schema` command outputs JSON Schema for pipeline specification files, enabling IDE autocompletion and validation.
+- OpenAPI documentation is available at the `/api-docs/openapi.json` endpoint.
+- Added `AWS_ENDPOINT_URL` environment variable support in pipeline specification files for S3-compatible storage backends.
+- Added `--storage-class-name` flag for `falconeri deploy` to configure Kubernetes storage class.
+- Developer: Added MinIO support for fully offline local development.
+- Developer: Added local development guide for macOS with Colima (see `guide/src/local/mac.md`).
+
 ### Changed
 
-- **BREAKING:** Migrated from Rocket to axum web framework.
-- **BREAKING:** Migrated from sync diesel to diesel-async with tokio-postgres.
-- **BREAKING:** Completely eliminated OpenSSL and libpq dependencies. Now uses pure-Rust rustls for TLS and tokio-postgres for database connections.
-- Replaced `ekidd/rust-musl-builder` with standard Rust musl toolchain for builds.
-- Database pool size is now configured via `FALCONERID_POOL_SIZE` environment variable (defaults to 32).
-- Removed `Rocket.toml` configuration file; server configuration is now hardcoded or via environment variables.
+- **BREAKING:** We now do `falconeri-worker` injection via a Kubernetes init container: User Docker images no longer need to include `falconeri-worker`. The worker binary is automatically injected from the `falconerid` image at job startup, ensuring version consistency.
+- **BREAKING (internal API):** Private REST API endpoints used by `falconeri-worker` have changed. The new init container injection ensures your `falconeri-worker` version always matches.
+- **BREAKING:** The Docker image registry moved from `faraday/falconeri` to `ghcr.io/dbcrossbar/falconeri`.
+- **BREAKING:** The default storage class changed from hardcoded `standard` to cluster default. GKE users should add `--storage-class-name=standard`. EKS 1.30+ users may need to specify a storage class explicitly.
+- **BREAKING:** GitHub repository moved from `faradayio` to `dbcrossbar`.
+- Internal: Migrated from Rocket to axum, from sync diesel to diesel-async, and from sync Rust to async Rust.
 
 ### Removed
 
-- `openssl-sys`, `openssl-probe`, and `pq-sys` dependencies.
-- `ROCKET_ENV` and `ROCKET_CONFIG` environment variables (no longer used).
+- Removed requirement to include `falconeri-worker` in user Docker images (now injected automatically).
+- Internal: Removed `Rocket.toml` configuration file, plus the `ROCKET_ENV` and `ROCKET_CONFIG` environment variables. This is probably mostly internal.
+- Internal: Replaced `ekidd/rust-musl-builder` with standard Rust musl toolchain for builds.
+- Internal: Completely eliminated OpenSSL and libpq dependencies. Builds now use pure-Rust rustls for TLS and tokio-postgres for database connections.
+
+### Fixed
+
+- Added pod ownership verification and enhanced logging to help diagnose the rare "duplicate key" error during datum uploads. If you've encountered this error, please watch for improved diagnostics in logs.
 
 ## [1.0.0-beta.12] - 2022-12-14
 
