@@ -22,7 +22,7 @@ falconeri job run my-job.json
 
 ## REST API
 
-Note that `falconerid` has a complete REST API, and you don't actually need to use the `falconeri` command-line tool during normal operations. This is used internally at Faraday, and it should be fairly self-explanatory, but it isn't documented.
+The `falconerid` server provides a complete REST API. You don't need to use the `falconeri` CLI during normal operations. See the [REST API documentation](guide/src/rest-api.md) for authentication details and OpenAPI specs.
 
 ## Contributing to `falconeri`
 
@@ -44,22 +44,17 @@ Next, check out the available tasks in the `justfile`:
 just --list
 ```
 
-For local development, you'll want to install [`minikube`](https://minikube.sigs.k8s.io/docs/start/). Start it as follows, and point your local Docker at it:
+For local development, you'll need a local Kubernetes cluster. See the detailed setup guides:
 
-```sh
-minikube start
-eval $(minikube docker-env)
-```
+- **macOS (Apple Silicon)**: [Colima setup](guide/src/local/mac.md)
+- **Linux (x86_64)**: [Minikube setup](guide/src/local/linux.md)
 
-Then build an image. **You must have `docker-env` set up as above** if you want to test this image.
+Both guides cover required prerequisites (musl toolchain, PostgreSQL client, MinIO client).
+
+Once your cluster is running, build and deploy:
 
 ```sh
 just image
-```
-
-Now you can deploy a development version of `falconeri` to `minikube`:
-
-```sh
 cargo run -p falconeri -- deploy --development
 ```
 
@@ -74,46 +69,33 @@ watch -n 5 kubectl get all
 
 ### Running the example program
 
-Running the example program is necessary to make sure `falconeri` works. First, run:
+Running the example program is necessary to make sure `falconeri` works. The `--development` deployment includes a MinIO server for local S3-compatible storage.
+
+In another terminal, start the proxy (this also forwards MinIO ports 9000 and 9001):
+
+```sh
+cargo run -p falconeri -- proxy
+```
+
+Set up MinIO and upload test data (one-time):
 
 ```sh
 cd examples/word-frequencies
+just mc-alias   # Configure MinIO CLI (reads credentials from K8s)
+just upload     # Create bucket and upload test texts
 ```
 
-Next, you'll need to set up an S3 bucket. If you're **at Faraday,** run:
+Run the example:
 
 ```sh
-# Faraday only!
-just secret
+just run        # Start the job
+just results    # View output (once job completes)
 ```
 
-If you're **not a Faraday**, create an S3 bucket, and place a `*.txt` file in `$MY_BUCKET/texts/`. Then, set up an AWS access key with read/write access to the bucket, and save the key pair in files named `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. Then run:
+For re-runs, clean up previous results first:
 
 ```sh
-# Not for Faraday!
-kubectl create secret generic s3 \
-    --from-file=AWS_ACCESS_KEY_ID \
-    --from-file=AWS_SECRET_ACCESS_KEY
-```
-
-Then edit `word-frequencies.json` to point at your bucket.
-
-Now you can build the worker image using:
-
-```sh
-# This assumes you previously ran `just image` in the top-level directory.
-just image
-```
-
-In another terminal, start a `falconeri proxy` command:
-
-```sh
-just proxy
-```
-
-In the original terminal, start the job:
-
-```sh
+just delete-results
 just run
 ```
 
@@ -138,10 +120,10 @@ $MY_NEW_VERSION: Short description
 You should be able to make a release by running:
 
 ```sh
-just MODE=release release
+just release
 ```
 
-Once the the binaries have built, you can find them at https://github.com/faradayio/falconeri/releases. The `CHANGELOG.md` entry should be automatically converted to release notes.
+Once the the binaries have built, you can find them at https://github.com/dbcrossbar/falconeri/releases. The `CHANGELOG.md` entry should be automatically converted to release notes.
 
 ### Changing the database schema
 
