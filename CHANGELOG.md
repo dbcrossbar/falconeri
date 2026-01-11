@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0-alpha.4] - 2026-01-11
+
+### Fixed
+
+- falconerid: Fixed old container repository URL in the job start code. Good catch! We missed this because we hadn't tested a standalone release yet, just the local development deploy.
+
 ## [2.0.0-alpha.3] - 2026-01-10
 
 ### Fixed
