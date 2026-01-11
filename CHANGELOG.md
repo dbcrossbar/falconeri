@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0-alpha.3] - 2026-01-10
+
+### Fixed
+
+- Fixed `falconeri proxy` to cleanup properly on Ctrl-C.
+- Fixed `falconeri proxy` to restart proxy processes when `falconerid` restarts, mostly for developer convenience.
+
 ## [2.0.0-alpha.2] - 2026-01-10
 
 ### Added
