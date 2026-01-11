@@ -1,24 +1,107 @@
-//! Support for Google Cloud Storage.
+//! Support for Google Cloud Storage using the native object_store crate.
 
-use std::{collections::HashSet, fs, io::BufRead, process::Stdio};
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::process::Command;
+use bytes::Bytes;
+use futures::TryStreamExt;
+use lazy_static::lazy_static;
+use object_store::{
+    gcp::GoogleCloudStorageBuilder, path::Path as ObjectPath, ObjectStore,
+    ObjectStoreExt, PutPayload,
+};
+use regex::Regex;
+use tokio::{fs as async_fs, io::AsyncWriteExt};
+use walkdir::WalkDir;
 
 use super::CloudStorage;
-use crate::{prelude::*, secret::Secret};
+use crate::{
+    kubernetes::{base64_encoded_optional_secret_string, kubectl_secret},
+    prelude::*,
+    secret::Secret,
+};
 
-/// Backend for talking to Google Cloud Storage, currently based on `gsutil`.
-#[derive(Debug)]
-pub struct GoogleCloudStorage {}
+/// A GCS secret fetched from Kubernetes.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GcsSecretData {
+    #[serde(default, with = "base64_encoded_optional_secret_string")]
+    #[serde(rename = "GOOGLE_APPLICATION_CREDENTIALS_JSON")]
+    service_account_key: Option<String>,
+}
+
+/// Parse a GCS URL into (bucket, key).
+fn parse_gs_url(url: &str) -> Result<(&str, &str)> {
+    lazy_static! {
+        static ref RE: Regex = Regex::new("^gs://(?P<bucket>[^/]+)(?:/(?P<key>.*))?$")
+            .expect("couldn't parse built-in regex");
+    }
+
+    let caps = RE
+        .captures(url)
+        .ok_or_else(|| format_err!("the URL {:?} could not be parsed", url))?;
+    let bucket = caps
+        .name("bucket")
+        .expect("missing hard-coded capture???")
+        .as_str();
+    let key = caps.name("key").map(|m| m.as_str()).unwrap_or("");
+
+    Ok((bucket, key))
+}
+
+/// Backend for talking to Google Cloud Storage using native Rust (no gsutil).
+pub struct GoogleCloudStorage {
+    store: Arc<dyn ObjectStore>,
+    bucket: String,
+}
 
 impl GoogleCloudStorage {
     /// Create a new `GoogleCloudStorage` backend.
     #[allow(clippy::new_ret_no_self)]
     #[instrument(skip_all, level = "trace")]
-    pub fn new(_secrets: &[Secret]) -> Result<Self> {
-        // We don't yet know how to authenticate using secrets.
-        Ok(GoogleCloudStorage {})
+    pub async fn new(secrets: &[Secret], uri: &str) -> Result<Self> {
+        let secret = secrets
+            .iter()
+            .find(|s| matches!(s, Secret::Env { env_var, .. } if env_var == "GOOGLE_APPLICATION_CREDENTIALS_JSON"));
+        let secret_data: Option<GcsSecretData> =
+            if let Some(Secret::Env { name, .. }) = secret {
+                kubectl_secret(name).await?
+            } else {
+                None
+            };
+
+        Self::build_from_secret(secret_data, uri)
+    }
+
+    fn build_from_secret(
+        secret_data: Option<GcsSecretData>,
+        uri: &str,
+    ) -> Result<Self> {
+        let (bucket, _) = parse_gs_url(uri)?;
+
+        let mut builder =
+            GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket);
+
+        if let Some(ref secret) = secret_data {
+            if let Some(ref service_account_key) = secret.service_account_key {
+                builder = builder.with_service_account_key(service_account_key);
+            }
+        }
+
+        let store = builder.build().context("failed to build GCS client")?;
+
+        Ok(GoogleCloudStorage {
+            store: Arc::new(store),
+            bucket: bucket.to_owned(),
+        })
+    }
+}
+
+impl fmt::Debug for GoogleCloudStorage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GoogleCloudStorage")
+            .field("bucket", &self.bucket)
+            .finish()
     }
 }
 
@@ -27,87 +110,166 @@ impl CloudStorage for GoogleCloudStorage {
     #[instrument(skip_all, fields(uri = %uri), level = "trace")]
     async fn list(&self, uri: &str) -> Result<Vec<String>> {
         trace!("listing {}", uri);
-        // Shell out to gsutil to list the files we want to process.
-        let output = Command::new("gsutil")
-            .arg("ls")
-            .arg(uri)
-            .stderr(Stdio::inherit())
-            .output()
+
+        let (bucket, key) = parse_gs_url(uri)?;
+        let mut prefix = key.to_owned();
+        if !key.is_empty() && !key.ends_with('/') {
+            prefix.push('/');
+        }
+
+        let prefix_path = if prefix.is_empty() {
+            None
+        } else {
+            Some(ObjectPath::from(prefix.as_str()))
+        };
+
+        let mut results = Vec::new();
+        let mut stream = self.store.list(prefix_path.as_ref());
+
+        while let Some(meta) = stream
+            .try_next()
             .await
-            .context("error running gsutil")?;
-        if !output.status.success() {
-            return Err(format_err!("could not list {:?}: {}", uri, output.status));
+            .context("error listing GCS objects")?
+        {
+            let path_str = meta.location.to_string();
+            if path_str != prefix {
+                results.push(format!("gs://{}/{}", bucket, path_str));
+            }
         }
-        // `gsutil ls` is "eventually consistent", and seems to occasionally retun
-        // duplicate entries.
-        let mut paths = HashSet::new();
-        for line in output.stdout.lines() {
-            let line = line?;
-            paths.insert(line.trim_end().to_owned());
-        }
-        Ok(paths.into_iter().collect())
+
+        Ok(results)
     }
 
     #[instrument(skip_all, fields(uri = %uri, local_path = %local_path.display()), level = "trace")]
     async fn sync_down(&self, uri: &str, local_path: &Path) -> Result<()> {
+        trace!("downloading {} to {}", uri, local_path.display());
+
+        let (_, key) = parse_gs_url(uri)?;
+
         if uri.ends_with('/') {
-            // We have a directory. If our source URI ends in `/`, so should our
-            // `local_path`, since we generate these ourselves.
-            assert!(local_path
-                .to_str()
-                .expect("path should be UTF-8")
-                .ends_with('/'));
-            trace!("syncing {} to {}", uri, local_path.display());
-            fs::create_dir_all(local_path)
-                .context("cannot create local download directory")?;
-            let status = Command::new("gsutil")
-                .args(["-m", "rsync"])
-                .arg(uri)
-                .arg(local_path)
-                .status()
+            async_fs::create_dir_all(local_path)
                 .await
-                .context("could not run gsutil rsync")?;
-            if !status.success() {
-                return Err(format_err!("could not download {:?}: {}", uri, status));
+                .context("cannot create local download directory")?;
+
+            let prefix = ObjectPath::from(key);
+            let mut stream = self.store.list(Some(&prefix));
+
+            while let Some(meta) = stream
+                .try_next()
+                .await
+                .context("error listing GCS objects")?
+            {
+                let object_key = meta.location.to_string();
+                let relative_path = object_key
+                    .strip_prefix(key)
+                    .unwrap_or(&object_key)
+                    .trim_start_matches('/');
+
+                if relative_path.is_empty() {
+                    continue;
+                }
+
+                let file_path = local_path.join(relative_path);
+
+                if let Some(parent) = file_path.parent() {
+                    async_fs::create_dir_all(parent)
+                        .await
+                        .context("cannot create local subdirectory")?;
+                }
+
+                let data = self
+                    .store
+                    .get(&meta.location)
+                    .await
+                    .context("error fetching GCS object")?
+                    .bytes()
+                    .await
+                    .context("error reading GCS object bytes")?;
+
+                let mut file = async_fs::File::create(&file_path)
+                    .await
+                    .context("cannot create local file")?;
+                file.write_all(&data)
+                    .await
+                    .context("cannot write to local file")?;
             }
         } else {
-            // We have a file. We can't use `gsutil rsync` for this case.
-            trace!("downloading {} to {}", uri, local_path.display());
             if let Some(parent) = local_path.parent() {
-                fs::create_dir_all(parent)
+                async_fs::create_dir_all(parent)
+                    .await
                     .context("cannot create local download directory")?;
             }
-            let status = Command::new("gsutil")
-                .args(["-m", "cp", "-r"])
-                .arg(uri)
-                .arg(local_path)
-                .status()
+
+            let object_path = ObjectPath::from(key);
+            let data = self
+                .store
+                .get(&object_path)
                 .await
-                .context("could not run gsutil cp")?;
-            if !status.success() {
-                return Err(format_err!("could not download {:?}: {}", uri, status));
-            }
+                .context("error fetching GCS object")?
+                .bytes()
+                .await
+                .context("error reading GCS object bytes")?;
+
+            let mut file = async_fs::File::create(local_path)
+                .await
+                .context("cannot create local file")?;
+            file.write_all(&data)
+                .await
+                .context("cannot write to local file")?;
         }
+
         Ok(())
     }
 
     #[instrument(skip_all, fields(local_path = %local_path.display(), uri = %uri), level = "trace")]
     async fn sync_up(&self, local_path: &Path, uri: &str) -> Result<()> {
         trace!("uploading {} to {}", local_path.display(), uri);
-        let status = Command::new("gsutil")
-            .args(["-m", "rsync", "-r"])
-            .arg(local_path)
-            .arg(uri)
-            .status()
-            .await
-            .context("could not run gsutil")?;
-        if !status.success() {
-            return Err(format_err!(
-                "could not upload {}: {}",
-                local_path.display(),
-                status,
-            ));
+
+        let (_, key) = parse_gs_url(uri)?;
+        let base_key = key.trim_end_matches('/');
+
+        for entry in WalkDir::new(local_path).into_iter().filter_map(|e| e.ok()) {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+
+            let file_path = entry.path();
+            let relative_path = file_path
+                .strip_prefix(local_path)
+                .context("failed to compute relative path")?;
+
+            let object_key = if base_key.is_empty() {
+                relative_path.to_string_lossy().to_string()
+            } else {
+                format!("{}/{}", base_key, relative_path.to_string_lossy())
+            };
+
+            let data = async_fs::read(file_path)
+                .await
+                .with_context(|| format!("cannot read local file {:?}", file_path))?;
+
+            let object_path = ObjectPath::from(object_key.as_str());
+            self.store
+                .put(&object_path, PutPayload::from(Bytes::from(data)))
+                .await
+                .with_context(|| format!("error uploading to GCS: {}", object_key))?;
         }
+
         Ok(())
     }
+}
+
+#[test]
+fn url_parsing() {
+    assert_eq!(parse_gs_url("gs://top-level").unwrap(), ("top-level", ""));
+    assert_eq!(parse_gs_url("gs://top-level/").unwrap(), ("top-level", ""));
+    assert_eq!(
+        parse_gs_url("gs://top-level/path").unwrap(),
+        ("top-level", "path")
+    );
+    assert_eq!(
+        parse_gs_url("gs://top-level/path/").unwrap(),
+        ("top-level", "path/")
+    );
+    assert!(parse_gs_url("s3://foo/").is_err());
 }
