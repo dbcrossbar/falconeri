@@ -7,6 +7,10 @@ ignore = [
     # utoipa-axum -> paste is unmaintained but there's no safe upgrade yet.
     # https://rustsec.org/advisories/RUSTSEC-2024-0436
     "RUSTSEC-2024-0436",
+    # aws-sdk-s3 -> lru has a soundness issue in IterMut. We don't use that
+    # iterator directly, and AWS SDK will eventually update their dependency.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0002
+    "RUSTSEC-2026-0002",
 ]
 
 [licenses]
@@ -69,6 +73,19 @@ skip-tree = [
     { name = "getrandom", version = "0.2" },
     # jni uses windows-sys 0.45; other deps use 0.61; affects Windows only
     { name = "windows-sys", version = "0.45" },
+    { name = "windows-sys", version = "0.52" },
     { name = "windows-sys", version = "0.60" },
+    # AWS SDK uses older versions of various crates alongside newer ones.
+    # These are transitive dependencies we can't control.
+    { name = "h2", version = "0.3" },
+    { name = "hashbrown", version = "0.15" },
+    { name = "http", version = "0.2" },
+    { name = "http-body", version = "0.4" },
+    { name = "hyper", version = "0.14" },
+    { name = "hyper-rustls", version = "0.24" },
+    { name = "rustls", version = "0.21" },
+    { name = "rustls-webpki", version = "0.101" },
+    { name = "socket2", version = "0.5" },
+    { name = "tokio-rustls", version = "0.24" },
 ]
 
