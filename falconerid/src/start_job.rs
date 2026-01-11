@@ -176,7 +176,7 @@ struct JobParams<'a> {
     pipeline_spec: &'a PipelineSpec,
     job_timeout: Option<u64>,
     job: &'a Job,
-    /// The falconeri image to use for init containers (e.g., "faraday/falconeri:2.0.0").
+    /// The falconeri image to use for init containers (e.g., "ghcr.io/dbcrossbar/falconeri:2.0.0").
     falconeri_image: String,
     /// Whether to use `imagePullPolicy: Never` for the init container (for local dev).
     use_local_image: bool,
@@ -186,7 +186,7 @@ impl<'a> JobParams<'a> {
     fn new(pipeline_spec: &'a PipelineSpec, job: &'a Job) -> JobParams<'a> {
         let job_timeout = pipeline_spec.job_timeout.map(|timeout| timeout.as_secs());
         let falconeri_image =
-            format!("faraday/falconeri:{}", env!("CARGO_PKG_VERSION"));
+            format!("ghcr.io/dbcrossbar/falconeri:{}", env!("CARGO_PKG_VERSION"));
         let use_local_image = kubernetes::use_local_image();
         Self {
             pipeline_spec,
