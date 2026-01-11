@@ -41,7 +41,7 @@ impl dyn CloudStorage {
         secrets: &[Secret],
     ) -> Result<Box<dyn CloudStorage>> {
         if uri.starts_with("gs://") {
-            Ok(Box::new(gs::GoogleCloudStorage::new(secrets)?))
+            Ok(Box::new(gs::GoogleCloudStorage::new(secrets).await?))
         } else if uri.starts_with("s3://") {
             Ok(Box::new(s3::S3Storage::new(secrets).await?))
         } else {

@@ -1,89 +1,120 @@
-//! Support for AWS S3 storage.
+//! Support for AWS S3 storage using the native AWS SDK.
 
-use std::{fs, process::Stdio};
+use std::fs;
 
 use async_trait::async_trait;
+use aws_config::BehaviorVersion;
+use aws_sdk_s3::Client;
+use aws_smithy_types::byte_stream::ByteStream;
 use lazy_static::lazy_static;
 use regex::Regex;
-use serde_json;
-use tokio::process::Command;
+use tokio::io::AsyncWriteExt;
 
 use super::CloudStorage;
-use crate::{
-    kubernetes::{
-        base64_encoded_optional_secret_string, base64_encoded_secret_string,
-        kubectl_secret,
-    },
-    prelude::*,
-    secret::Secret,
-};
+use crate::{prelude::*, secret::Secret};
 
-/// An S3 secret fetched from Kubernetes. This can be fetched using
-/// `kubernetes_secret`.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
-struct S3SecretData {
-    /// Our `AWS_ACCESS_KEY_ID` value.
-    #[serde(with = "base64_encoded_secret_string")]
-    aws_access_key_id: String,
-    /// Our `AWS_SECRET_ACCESS_KEY` value.
-    #[serde(with = "base64_encoded_secret_string")]
-    aws_secret_access_key: String,
-    /// Optional custom endpoint URL for S3-compatible services like MinIO.
-    #[serde(default, with = "base64_encoded_optional_secret_string")]
-    aws_endpoint_url: Option<String>,
-}
-
-/// Backend for talking to AWS S3, currently based on `awscli`.
+/// Backend for talking to AWS S3 using the native AWS SDK.
+///
+/// Credentials are read from the environment via the standard AWS credential
+/// chain: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, and
+/// optionally `AWS_ENDPOINT_URL` for S3-compatible services like MinIO.
 pub struct S3Storage {
-    secret_data: Option<S3SecretData>,
+    client: Client,
 }
 
 impl S3Storage {
     /// Create a new `S3Storage` backend.
+    ///
+    /// The SDK automatically picks up credentials from environment variables
+    /// (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY) and custom endpoints
+    /// (AWS_ENDPOINT_URL for MinIO).
     #[allow(clippy::new_ret_no_self)]
     #[instrument(skip_all, level = "trace")]
-    pub async fn new(secrets: &[Secret]) -> Result<Self> {
-        let secret = secrets.iter().find(|s| {
-            matches!(s, Secret::Env { env_var, .. } if env_var == "AWS_ACCESS_KEY_ID")
-        });
-        let secret_data = if let Some(Secret::Env { name, .. }) = secret {
-            Some(kubectl_secret(name).await?)
-        } else {
-            None
-        };
-        Ok(S3Storage { secret_data })
+    pub async fn new(_secrets: &[Secret]) -> Result<Self> {
+        // The SDK automatically reads AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+        // AWS_REGION, and AWS_ENDPOINT_URL from the environment.
+        let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
+        let client = Client::new(&config);
+        Ok(S3Storage { client })
     }
 
-    /// Construct a new `S3Storage` backend, using an AWS access key from
-    /// the Kubernetes secret `secret_name`.
-    #[instrument(skip_all, fields(secret_name = %secret_name), level = "trace")]
-    pub async fn new_with_secret(secret_name: &str) -> Result<Self> {
-        Ok(S3Storage {
-            secret_data: kubectl_secret(secret_name).await?,
-        })
+    /// Construct a new `S3Storage` backend.
+    ///
+    /// This is a simplified constructor that ignores the secret_name parameter
+    /// since credentials are now read from the environment.
+    #[instrument(skip_all, fields(secret_name = %_secret_name), level = "trace")]
+    pub async fn new_with_secret(_secret_name: &str) -> Result<Self> {
+        Self::new(&[]).await
     }
 
-    /// Build a `Command` object which calls the `aws` CLI tool, including any
-    /// authentication that we happen to have.
-    #[instrument(skip_all, level = "trace")]
-    fn aws_command(&self) -> Command {
-        let mut command = Command::new("aws");
-        if let Some(secret_data) = &self.secret_data {
-            command.env("AWS_ACCESS_KEY_ID", &secret_data.aws_access_key_id);
-            command.env("AWS_SECRET_ACCESS_KEY", &secret_data.aws_secret_access_key);
-            // Support custom S3-compatible endpoints (e.g., MinIO).
-            if let Some(endpoint_url) = &secret_data.aws_endpoint_url {
-                command.args(["--endpoint-url", endpoint_url]);
-            }
-        }
-        command
+    /// Download a single file from S3 to a local path.
+    #[instrument(skip_all, fields(bucket = %bucket, key = %key, local_path = %local_path.display()), level = "trace")]
+    async fn download_file(
+        &self,
+        bucket: &str,
+        key: &str,
+        local_path: &Path,
+    ) -> Result<()> {
+        let response = self
+            .client
+            .get_object()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await
+            .with_context(|| format!("failed to get object s3://{bucket}/{key}"))?;
+
+        let mut file =
+            tokio::fs::File::create(local_path).await.with_context(|| {
+                format!("failed to create local file {}", local_path.display())
+            })?;
+
+        let mut stream = response.body.into_async_read();
+        tokio::io::copy(&mut stream, &mut file)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to write s3://{bucket}/{key} to {}",
+                    local_path.display()
+                )
+            })?;
+
+        file.flush().await?;
+        Ok(())
+    }
+
+    /// Upload a single file from a local path to S3.
+    #[instrument(skip_all, fields(local_path = %local_path.display(), bucket = %bucket, key = %key), level = "trace")]
+    async fn upload_file(
+        &self,
+        local_path: &Path,
+        bucket: &str,
+        key: &str,
+    ) -> Result<()> {
+        let body = ByteStream::from_path(local_path).await.with_context(|| {
+            format!("failed to read local file {}", local_path.display())
+        })?;
+
+        self.client
+            .put_object()
+            .bucket(bucket)
+            .key(key)
+            .body(body)
+            .send()
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to upload {} to s3://{bucket}/{key}",
+                    local_path.display()
+                )
+            })?;
+
+        Ok(())
     }
 }
 
 impl fmt::Debug for S3Storage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Don't include secrets in the debug output, for trace mode.
         f.debug_struct("S3Storage").finish()
     }
 }
@@ -100,78 +131,85 @@ impl CloudStorage for S3Storage {
             prefix.push('/');
         }
 
-        // Use `aws` to list our bucket, and parse the results.
-        let output = self
-            .aws_command()
-            .args(["s3api", "list-objects-v2"])
-            .arg("--bucket")
-            .arg(bucket)
-            .arg("--prefix")
-            .arg(prefix.clone())
-            .stderr(Stdio::inherit())
-            .output()
-            .await
-            .context("could not run aws")?;
-        if !output.status.success() {
-            return Err(format_err!("could not list {:?}: {}", uri, output.status));
-        }
-        let s3_output: ListObjectsV2Output = serde_json::from_slice(&output.stdout)
-            .context("error parsing list-objects-v2 output")?;
+        let mut results = Vec::new();
+        let mut continuation_token: Option<String> = None;
 
-        // Fail if the bucket has too many entries to get in one call.
-        //
-        // TODO: Chain together multiple calls to `list-objects-v2`.
-        if s3_output.is_truncated.unwrap_or(false) {
-            return Err(format_err!(
-                "S3 prefix {:?} contains too many objects for this version",
-                uri,
-            ));
+        loop {
+            let mut request =
+                self.client.list_objects_v2().bucket(bucket).prefix(&prefix);
+
+            if let Some(token) = continuation_token.take() {
+                request = request.continuation_token(token);
+            }
+
+            let response = request
+                .send()
+                .await
+                .with_context(|| format!("failed to list objects in {uri}"))?;
+
+            if let Some(contents) = response.contents {
+                for obj in contents {
+                    if let Some(obj_key) = obj.key {
+                        // Skip the directory itself.
+                        if obj_key != prefix {
+                            results.push(format!("s3://{bucket}/{obj_key}"));
+                        }
+                    }
+                }
+            }
+
+            // Check if there are more results to fetch.
+            if response.is_truncated.unwrap_or(false) {
+                continuation_token = response.next_continuation_token;
+                if continuation_token.is_none() {
+                    break;
+                }
+            } else {
+                break;
+            }
         }
 
-        Ok(s3_output
-            .contents
-            .into_iter()
-            // Remove the directory itself.
-            .filter(|obj| obj.key != prefix)
-            // Convert to URLs.
-            .map(|obj| format!("s3://{}/{}", bucket, obj.key))
-            .collect::<Vec<_>>())
+        Ok(results)
     }
 
     #[instrument(skip_all, fields(uri = %uri, local_path = %local_path.display()), level = "trace")]
     async fn sync_down(&self, uri: &str, local_path: &Path) -> Result<()> {
         trace!("downloading {} to {}", uri, local_path.display());
+
+        let (bucket, key) = parse_s3_url(uri)?;
+
         if uri.ends_with('/') {
+            // Directory sync: list all objects with the prefix and download each.
             fs::create_dir_all(local_path)
                 .context("cannot create local download directory")?;
-            let status = self
-                .aws_command()
-                .args(["s3", "sync", "--quiet"])
-                .arg(uri)
-                .arg(local_path)
-                .status()
-                .await
-                .context("could not run aws s3")?;
-            if !status.success() {
-                return Err(format_err!("could not download {:?}: {}", uri, status));
+
+            let objects = self.list(uri).await?;
+            for obj_uri in objects {
+                let (_, obj_key) = parse_s3_url(&obj_uri)?;
+                // Calculate the relative path from the prefix.
+                let relative_path = obj_key
+                    .strip_prefix(key)
+                    .unwrap_or(obj_key)
+                    .trim_start_matches('/');
+                let dest_path = local_path.join(relative_path);
+
+                // Create parent directories if needed.
+                if let Some(parent) = dest_path.parent() {
+                    fs::create_dir_all(parent)
+                        .context("cannot create local download directory")?;
+                }
+
+                self.download_file(bucket, obj_key, &dest_path).await?;
             }
         } else {
+            // Single file download.
             if let Some(parent) = local_path.parent() {
                 fs::create_dir_all(parent)
                     .context("cannot create local download directory")?;
             }
-            let status = self
-                .aws_command()
-                .args(["s3", "cp"])
-                .arg(uri)
-                .arg(local_path)
-                .status()
-                .await
-                .context("could not run aws s3")?;
-            if !status.success() {
-                return Err(format_err!("could not download {:?}: {}", uri, status));
-            }
+            self.download_file(bucket, key, local_path).await?;
         }
+
         Ok(())
     }
 
@@ -179,29 +217,42 @@ impl CloudStorage for S3Storage {
     async fn sync_up(&self, local_path: &Path, uri: &str) -> Result<()> {
         trace!("uploading {} to {}", local_path.display(), uri);
 
-        // We assume that we only need to support directories, namely /pfs/out.
-        let status = self
-            .aws_command()
-            .args(["s3", "sync", "--quiet"])
-            .arg(local_path)
-            .arg(uri)
-            .status()
-            .await
-            .context("could not run aws s3")?;
-        if !status.success() {
-            return Err(format_err!(
-                "could not upload {:?}: {}",
-                local_path.display(),
-                status,
-            ));
+        let (bucket, key) = parse_s3_url(uri)?;
+
+        if local_path.is_dir() {
+            // Directory sync: walk the directory and upload each file.
+            for entry in walkdir::WalkDir::new(local_path)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+            {
+                let file_path = entry.path();
+                let relative_path = file_path
+                    .strip_prefix(local_path)
+                    .context("failed to compute relative path")?;
+                let obj_key = if key.is_empty() {
+                    relative_path.to_string_lossy().to_string()
+                } else {
+                    format!(
+                        "{}/{}",
+                        key.trim_end_matches('/'),
+                        relative_path.to_string_lossy()
+                    )
+                };
+
+                self.upload_file(file_path, bucket, &obj_key).await?;
+            }
+        } else {
+            // Single file upload.
+            self.upload_file(local_path, bucket, key).await?;
         }
+
         Ok(())
     }
 }
 
 /// Parse an S3 URL.
 fn parse_s3_url(url: &str) -> Result<(&str, &str)> {
-    // lazy_static allows us to compile this regex only once.
     lazy_static! {
         static ref RE: Regex = Regex::new("^s3://(?P<bucket>[^/]+)(?:/(?P<key>.*))?$")
             .expect("couldn't parse built-in regex");
@@ -232,26 +283,4 @@ fn url_parsing() {
         ("top-level", "path/")
     );
     assert!(parse_s3_url("gs://foo/").is_err());
-}
-
-/// Local, `serde`-compatible reimplementation of
-/// [`rusoto_s3::ListObjectsV2Output`][rusoto].
-///
-/// [rusoto]:
-/// https://rusoto.github.io/rusoto/rusoto_s3/struct.ListObjectsV2Output.html
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct ListObjectsV2Output {
-    #[serde(default)]
-    contents: Vec<Object>,
-    is_truncated: Option<bool>,
-}
-
-/// Local, `serde`-compatible reimplementation of [`rusoto_s3::Output`][rusoto].
-///
-/// [rusoto]: https://rusoto.github.io/rusoto/rusoto_s3/struct.Object.html
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct Object {
-    key: String,
 }
