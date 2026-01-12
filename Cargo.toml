@@ -1,5 +1,5 @@
 [workspace]
-members = ["falconeri", "falconerid", "falconeri-worker", "falconeri_common", "arrow-rs-object-store"]
+members = ["falconeri", "falconerid", "falconeri-worker", "falconeri_common"]
 
 [workspace.package]
 version = "2.0.0-alpha.4"
@@ -10,7 +10,7 @@ license = "Apache-2.0 OR MIT"
 [workspace.dependencies]
 bytes = "1.0"
 futures = "0.3"
-object_store = { path = "arrow-rs-object-store", features = ["aws", "gcp", "fs"] }
+object_store = { git = "https://github.com/apache/arrow-rs-object-store.git", features = ["aws", "gcp", "fs"] }
 serde = { version = "1.0.70", features = ["derive"] }
 tokio = "1.42.0"
 tracing = "0.1.29"
