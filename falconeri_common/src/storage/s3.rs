@@ -95,7 +95,11 @@ impl S3Storage {
     ) -> Result<Self> {
         let (bucket, _) = parse_s3_url(uri)?;
 
-        let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
+        // Use from_env() to pick up AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+        // AWS_ENDPOINT_URL, and AWS_REGION from environment variables.
+        let mut builder = AmazonS3Builder::from_env()
+            .with_bucket_name(bucket)
+            .with_allow_http(true);
 
         if let Some(ref secret) = secret_data {
             builder = builder
@@ -103,14 +107,12 @@ impl S3Storage {
                 .with_secret_access_key(&secret.aws_secret_access_key);
 
             if let Some(ref endpoint_url) = secret.aws_endpoint_url {
-                builder = builder.with_endpoint(endpoint_url).with_allow_http(true);
+                builder = builder.with_endpoint(endpoint_url);
             }
 
             if let Some(ref region) = secret.aws_region {
                 builder = builder.with_region(region);
             }
-        } else {
-            builder = builder.with_region("us-east-1");
         }
 
         let store = builder.build().context("failed to build S3 client")?;

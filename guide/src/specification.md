@@ -34,3 +34,41 @@ In order to authenticate with S3, you will need to create a secret, and add a `t
   }
 ]
 ```
+
+## GCS authentication
+
+For Google Cloud Storage, create a Kubernetes secret containing your service account key JSON, then reference it in your pipeline specification.
+
+First, create the secret from your service account key file:
+
+```bash
+kubectl create secret generic gcs \
+    --from-file=GOOGLE_APPLICATION_CREDENTIALS_JSON=/path/to/service-account-key.json
+```
+
+Then add this to your pipeline specification:
+
+```json
+"secrets": [
+  {
+    "name": "gcs",
+    "key": "GOOGLE_APPLICATION_CREDENTIALS_JSON",
+    "env_var": "GOOGLE_APPLICATION_CREDENTIALS_JSON"
+  }
+]
+```
+
+Your input and egress URIs should use the `gs://` scheme:
+
+```json
+"input": {
+    "atom": {
+        "repo": "my-data",
+        "URI": "gs://my-bucket/inputs/",
+        "glob": "/*"
+    }
+},
+"egress": {
+    "URI": "gs://my-bucket/outputs/"
+}
+```

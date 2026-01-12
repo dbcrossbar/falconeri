@@ -82,10 +82,17 @@ impl GoogleCloudStorage {
         let mut builder =
             GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket);
 
+        // First try secret_data from Kubernetes (used by falconerid).
         if let Some(ref secret) = secret_data {
             if let Some(ref service_account_key) = secret.service_account_key {
                 builder = builder.with_service_account_key(service_account_key);
             }
+        } else if let Ok(service_account_key) =
+            std::env::var("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+        {
+            // Fall back to environment variable (used by worker pods where
+            // secrets are mounted as env vars).
+            builder = builder.with_service_account_key(&service_account_key);
         }
 
         let store = builder.build().context("failed to build GCS client")?;

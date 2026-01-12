@@ -1,0 +1,96 @@
+# GCS end-to-end test for falconeri.
+#
+# Prerequisites:
+# 1. Set GOOGLE_APPLICATION_CREDENTIALS to your service account key file path
+# 2. Set GCS_BUCKET to your test bucket (e.g., "gs://my-test-bucket" or "my-test-bucket")
+# 3. Have gcloud/gsutil installed and authenticated
+# 4. Have the word-frequencies Docker image built (run `just image` in ../word-frequencies)
+# 5. Have falconeri deployed and proxy running
+
+# Helper to get bucket name (strips gs:// prefix if present)
+_bucket := ```
+    bucket="${GCS_BUCKET:-faraday-falconeri-test}"
+    echo "${bucket#gs://}"
+```
+
+# Create Kubernetes secret for GCS credentials from GOOGLE_APPLICATION_CREDENTIALS file.
+create-secret:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]]; then
+        echo "Error: GOOGLE_APPLICATION_CREDENTIALS environment variable not set"
+        echo "Set it to the path of your service account key JSON file"
+        exit 1
+    fi
+    if [[ ! -f "$GOOGLE_APPLICATION_CREDENTIALS" ]]; then
+        echo "Error: File not found: $GOOGLE_APPLICATION_CREDENTIALS"
+        exit 1
+    fi
+    # Delete existing secret if present (ignore errors)
+    kubectl delete secret gcs 2>/dev/null || true
+    # Create new secret with the JSON content
+    kubectl create secret generic gcs \
+        --from-file=GOOGLE_APPLICATION_CREDENTIALS_JSON="$GOOGLE_APPLICATION_CREDENTIALS"
+    echo "Created Kubernetes secret 'gcs' from $GOOGLE_APPLICATION_CREDENTIALS"
+
+# Upload test texts to GCS.
+upload:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bucket="${GCS_BUCKET:-faraday-falconeri-test}"
+    bucket="${bucket#gs://}"
+    gsutil cp ../word-frequencies/texts/*.txt "gs://${bucket}/texts/"
+
+# Run the GCS example job.
+run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bucket="${GCS_BUCKET:-faraday-falconeri-test}"
+    bucket="${bucket#gs://}"
+    # Generate pipeline spec with correct bucket name
+    sed "s/falconeri-test/${bucket}/g" word-frequencies-gcs.json > /tmp/word-frequencies-gcs-run.json
+    cargo run -p falconeri -- job run /tmp/word-frequencies-gcs-run.json
+
+# Print results from GCS.
+results:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bucket="${GCS_BUCKET:-faraday-falconeri-test}"
+    bucket="${bucket#gs://}"
+    gsutil cat "gs://${bucket}/word-frequencies/buffalo-public-library-1883.txt" | head -20
+
+# Delete results from GCS (to verify fresh output on re-runs).
+delete-results:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bucket="${GCS_BUCKET:-faraday-falconeri-test}"
+    bucket="${bucket#gs://}"
+    gsutil rm -r "gs://${bucket}/word-frequencies/" || true
+
+# Delete input texts from GCS.
+delete-inputs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bucket="${GCS_BUCKET:-faraday-falconeri-test}"
+    bucket="${bucket#gs://}"
+    gsutil rm -r "gs://${bucket}/texts/" || true
+
+# Full cleanup: delete all test data from GCS.
+cleanup: delete-results delete-inputs
+
+# Delete the GCS Kubernetes secret.
+delete-secret:
+    kubectl delete secret gcs || true
+
+# Full test: create secret, upload, run, wait, check results.
+test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just create-secret
+    just upload
+    just delete-results || true
+    JOB_ID=$(just run | tail -1)
+    echo "Job ID: $JOB_ID"
+    cargo run -p falconeri -- job wait "$JOB_ID"
+    echo "=== Results ==="
+    just results
