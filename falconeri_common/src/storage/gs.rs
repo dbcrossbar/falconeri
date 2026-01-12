@@ -3,18 +3,16 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use object_store::{
     gcp::GoogleCloudStorageBuilder, path::Path as ObjectPath, ObjectStore,
-    ObjectStoreExt, PutPayload,
 };
 use regex::Regex;
-use tokio::{fs as async_fs, io::AsyncWriteExt};
+use tokio::fs as async_fs;
 use walkdir::WalkDir;
 
-use super::CloudStorage;
+use super::{stream_download_to_file, stream_upload_from_file, CloudStorage};
 use crate::{
     kubernetes::{base64_encoded_optional_secret_string, kubectl_secret},
     prelude::*,
@@ -57,9 +55,12 @@ pub struct GoogleCloudStorage {
 
 impl GoogleCloudStorage {
     /// Create a new `GoogleCloudStorage` backend.
+    ///
+    /// The `bucket_uri` parameter should be any `gs://` URI within the bucket
+    /// we want to access. The bucket name is extracted from this URI.
     #[allow(clippy::new_ret_no_self)]
     #[instrument(skip_all, level = "trace")]
-    pub async fn new(secrets: &[Secret], uri: &str) -> Result<Self> {
+    pub async fn new(secrets: &[Secret], bucket_uri: &str) -> Result<Self> {
         let secret = secrets
             .iter()
             .find(|s| matches!(s, Secret::Env { env_var, .. } if env_var == "GOOGLE_APPLICATION_CREDENTIALS_JSON"));
@@ -70,14 +71,14 @@ impl GoogleCloudStorage {
                 None
             };
 
-        Self::build_from_secret(secret_data, uri)
+        Self::build_from_secret(secret_data, bucket_uri)
     }
 
     fn build_from_secret(
         secret_data: Option<GcsSecretData>,
-        uri: &str,
+        bucket_uri: &str,
     ) -> Result<Self> {
-        let (bucket, _) = parse_gs_url(uri)?;
+        let (bucket, _) = parse_gs_url(bucket_uri)?;
 
         let mut builder =
             GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket);
@@ -154,6 +155,8 @@ impl CloudStorage for GoogleCloudStorage {
         let (_, key) = parse_gs_url(uri)?;
 
         if uri.ends_with('/') {
+            // We have a directory. If our source URI ends in `/`, so should our
+            // `local_path`, since we generate these ourselves.
             async_fs::create_dir_all(local_path)
                 .await
                 .context("cannot create local download directory")?;
@@ -184,23 +187,11 @@ impl CloudStorage for GoogleCloudStorage {
                         .context("cannot create local subdirectory")?;
                 }
 
-                let data = self
-                    .store
-                    .get(&meta.location)
-                    .await
-                    .context("error fetching GCS object")?
-                    .bytes()
-                    .await
-                    .context("error reading GCS object bytes")?;
-
-                let mut file = async_fs::File::create(&file_path)
-                    .await
-                    .context("cannot create local file")?;
-                file.write_all(&data)
-                    .await
-                    .context("cannot write to local file")?;
+                stream_download_to_file(&self.store, &meta.location, &file_path)
+                    .await?;
             }
         } else {
+            // We have a file.
             if let Some(parent) = local_path.parent() {
                 async_fs::create_dir_all(parent)
                     .await
@@ -208,21 +199,7 @@ impl CloudStorage for GoogleCloudStorage {
             }
 
             let object_path = ObjectPath::from(key);
-            let data = self
-                .store
-                .get(&object_path)
-                .await
-                .context("error fetching GCS object")?
-                .bytes()
-                .await
-                .context("error reading GCS object bytes")?;
-
-            let mut file = async_fs::File::create(local_path)
-                .await
-                .context("cannot create local file")?;
-            file.write_all(&data)
-                .await
-                .context("cannot write to local file")?;
+            stream_download_to_file(&self.store, &object_path, local_path).await?;
         }
 
         Ok(())
@@ -251,13 +228,8 @@ impl CloudStorage for GoogleCloudStorage {
                 format!("{}/{}", base_key, relative_path.to_string_lossy())
             };
 
-            let data = async_fs::read(file_path)
-                .await
-                .with_context(|| format!("cannot read local file {:?}", file_path))?;
-
             let object_path = ObjectPath::from(object_key.as_str());
-            self.store
-                .put(&object_path, PutPayload::from(Bytes::from(data)))
+            stream_upload_from_file(&self.store, file_path, &object_path)
                 .await
                 .with_context(|| format!("error uploading to GCS: {}", object_key))?;
         }
