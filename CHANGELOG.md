@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added GCS (Google Cloud Storage) authentication support with three options:
+  - **GKE Workload Identity / metadata service**: Automatic authentication when running on GKE with workload identity configured
+  - **`GOOGLE_APPLICATION_CREDENTIALS`**: Standard environment variable pointing to a service account key file path (used by `object_store` library)
+  - **`GOOGLE_APPLICATION_CREDENTIALS_JSON`**: Inline JSON content of service account key (for Kubernetes secrets mounted as env vars in worker pods)
+- Added GCS end-to-end test example in `examples/word-frequencies-gcs/`
+
+### Changed
+
+- Replaced `gsutil` and `aws` CLIs with native Rust `object_store` crate for cloud storage operations. This means smaller worker images and better error handling.
+
 ## [2.0.0-alpha.4] - 2026-01-11
 
 ### Fixed

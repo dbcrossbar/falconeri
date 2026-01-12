@@ -1,6 +1,15 @@
 gh-pages
 guide/book
 justfile
-# Ignore most of target, but allow musl binaries for Docker builds
+# Ignore most of target, but allow only the specific musl binaries we need
 target/*
 !target/x86_64-unknown-linux-musl
+target/x86_64-unknown-linux-musl/*
+!target/x86_64-unknown-linux-musl/debug
+!target/x86_64-unknown-linux-musl/release
+target/x86_64-unknown-linux-musl/debug/*
+!target/x86_64-unknown-linux-musl/debug/falconerid
+!target/x86_64-unknown-linux-musl/debug/falconeri-worker
+target/x86_64-unknown-linux-musl/release/*
+!target/x86_64-unknown-linux-musl/release/falconerid
+!target/x86_64-unknown-linux-musl/release/falconeri-worker
