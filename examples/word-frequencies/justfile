@@ -3,6 +3,10 @@
 # cluster (on Mac or Linux), and how to point your `kubectl` at it.
 #
 # You can find the input data in `texts`.
+#
+# Test runs use random paths to avoid conflicts from simultaneous runs.
+# Use `just test` for automated testing, or run individual commands with
+# a TEST_RUN_ID environment variable for manual testing.
 
 # Build our image.
 image:
@@ -12,7 +16,6 @@ image:
 proxy:
     cargo run -p falconeri -- proxy
 
-
 # Set up MinIO CLI alias (requires proxy running).
 mc-alias:
     #!/usr/bin/env bash
@@ -21,19 +24,71 @@ mc-alias:
     mc alias set local http://localhost:9000 minioadmin "$MINIO_PASS"
 
 # Upload test texts to MinIO (requires proxy running and mc-alias).
+# Uses TEST_RUN_ID env var for path isolation, or generates one if not set.
 upload:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    RUN_ID="${TEST_RUN_ID:-$(openssl rand -hex 4)}"
+    echo "TEST_RUN_ID=$RUN_ID"
     mc mb --ignore-existing local/falconeri-test
-    mc cp texts/*.txt local/falconeri-test/texts/
+    mc cp texts/*.txt "local/falconeri-test/test-$RUN_ID/texts/"
 
-# Run our example job.
+# Run our example job with random paths.
+# Uses TEST_RUN_ID env var for path isolation, or generates one if not set.
 run:
-    cargo run -p falconeri -- job run word-frequencies.json
+    #!/usr/bin/env bash
+    set -euo pipefail
+    RUN_ID="${TEST_RUN_ID:-$(openssl rand -hex 4)}"
+    echo "TEST_RUN_ID=$RUN_ID"
+    # Generate pipeline spec with unique paths
+    sed -e "s|s3://falconeri-test/texts/|s3://falconeri-test/test-$RUN_ID/texts/|g" \
+        -e "s|s3://falconeri-test/word-frequencies/|s3://falconeri-test/test-$RUN_ID/word-frequencies/|g" \
+        word-frequencies.json > /tmp/word-frequencies-run.json
+    cargo run -p falconeri -- job run /tmp/word-frequencies-run.json
 
 # Print results from MinIO (requires proxy running and mc-alias).
-# Output filename mirrors input: texts/foo.txt -> word-frequencies/foo.txt
+# Requires TEST_RUN_ID env var to be set.
 results:
-    mc cat local/falconeri-test/word-frequencies/buffalo-public-library-1883.txt | head -20
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -z "${TEST_RUN_ID:-}" ]]; then
+        echo "Error: TEST_RUN_ID not set. Run 'just test' for automated testing."
+        exit 1
+    fi
+    mc cat "local/falconeri-test/test-$TEST_RUN_ID/word-frequencies/buffalo-public-library-1883.txt" | head -20
 
-# Delete results from MinIO (to verify fresh output on re-runs).
-delete-results:
-    mc rm --recursive --force local/falconeri-test/word-frequencies/
+# Delete test data from MinIO.
+# Requires TEST_RUN_ID env var to be set.
+delete-test-data:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -z "${TEST_RUN_ID:-}" ]]; then
+        echo "Error: TEST_RUN_ID not set."
+        exit 1
+    fi
+    mc rm --recursive --force "local/falconeri-test/test-$TEST_RUN_ID/" || true
+
+# Full test: upload, run, wait, check results, cleanup.
+test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export TEST_RUN_ID="$(openssl rand -hex 4)"
+    echo "=== Test run: $TEST_RUN_ID ==="
+    
+    echo "=== Uploading test data ==="
+    just upload
+    
+    echo "=== Running job ==="
+    JOB_ID=$(just run | tail -1)
+    echo "Job ID: $JOB_ID"
+    
+    echo "=== Waiting for job ==="
+    cargo run -p falconeri -- job wait "$JOB_ID"
+    
+    echo "=== Results ==="
+    just results
+    
+    echo "=== Cleaning up ==="
+    just delete-test-data
+    
+    echo "=== Test passed ==="

@@ -6,6 +6,10 @@
 # 3. Have gcloud/gsutil installed and authenticated
 # 4. Have the word-frequencies Docker image built (run `just image` in ../word-frequencies)
 # 5. Have falconeri deployed and proxy running
+#
+# Test runs use random paths to avoid conflicts from simultaneous runs.
+# Use `just test` for automated testing, or run individual commands with
+# a TEST_RUN_ID environment variable for manual testing.
 
 # Helper to get bucket name (strips gs:// prefix if present)
 _bucket := ```
@@ -34,63 +38,88 @@ create-secret:
     echo "Created Kubernetes secret 'gcs' from $GOOGLE_APPLICATION_CREDENTIALS"
 
 # Upload test texts to GCS.
+# Uses TEST_RUN_ID env var for path isolation, or generates one if not set.
 upload:
     #!/usr/bin/env bash
     set -euo pipefail
+    RUN_ID="${TEST_RUN_ID:-$(openssl rand -hex 4)}"
+    echo "TEST_RUN_ID=$RUN_ID"
     bucket="${GCS_BUCKET:-faraday-falconeri-test}"
     bucket="${bucket#gs://}"
-    gsutil cp ../word-frequencies/texts/*.txt "gs://${bucket}/texts/"
+    gsutil cp ../word-frequencies/texts/*.txt "gs://${bucket}/test-${RUN_ID}/texts/"
 
-# Run the GCS example job.
+# Run the GCS example job with random paths.
+# Uses TEST_RUN_ID env var for path isolation, or generates one if not set.
 run:
     #!/usr/bin/env bash
     set -euo pipefail
+    RUN_ID="${TEST_RUN_ID:-$(openssl rand -hex 4)}"
+    echo "TEST_RUN_ID=$RUN_ID"
     bucket="${GCS_BUCKET:-faraday-falconeri-test}"
     bucket="${bucket#gs://}"
-    # Generate pipeline spec with correct bucket name
-    sed "s/falconeri-test/${bucket}/g" word-frequencies-gcs.json > /tmp/word-frequencies-gcs-run.json
+    # Generate pipeline spec with correct bucket name and unique paths
+    sed -e "s/falconeri-test/${bucket}/g" \
+        -e "s|gs://${bucket}/texts/|gs://${bucket}/test-${RUN_ID}/texts/|g" \
+        -e "s|gs://${bucket}/word-frequencies/|gs://${bucket}/test-${RUN_ID}/word-frequencies/|g" \
+        word-frequencies-gcs.json > /tmp/word-frequencies-gcs-run.json
     cargo run -p falconeri -- job run /tmp/word-frequencies-gcs-run.json
 
 # Print results from GCS.
+# Requires TEST_RUN_ID env var to be set.
 results:
     #!/usr/bin/env bash
     set -euo pipefail
+    if [[ -z "${TEST_RUN_ID:-}" ]]; then
+        echo "Error: TEST_RUN_ID not set. Run 'just test' for automated testing."
+        exit 1
+    fi
     bucket="${GCS_BUCKET:-faraday-falconeri-test}"
     bucket="${bucket#gs://}"
-    gsutil cat "gs://${bucket}/word-frequencies/buffalo-public-library-1883.txt" | head -20
+    # Use temp file to avoid SIGPIPE issues with gsutil | head
+    gsutil cat "gs://${bucket}/test-${TEST_RUN_ID}/word-frequencies/buffalo-public-library-1883.txt" > /tmp/gcs-results.txt
+    head -20 /tmp/gcs-results.txt
 
-# Delete results from GCS (to verify fresh output on re-runs).
-delete-results:
+# Delete test data from GCS.
+# Requires TEST_RUN_ID env var to be set.
+delete-test-data:
     #!/usr/bin/env bash
     set -euo pipefail
+    if [[ -z "${TEST_RUN_ID:-}" ]]; then
+        echo "Error: TEST_RUN_ID not set."
+        exit 1
+    fi
     bucket="${GCS_BUCKET:-faraday-falconeri-test}"
     bucket="${bucket#gs://}"
-    gsutil rm -r "gs://${bucket}/word-frequencies/" || true
-
-# Delete input texts from GCS.
-delete-inputs:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    bucket="${GCS_BUCKET:-faraday-falconeri-test}"
-    bucket="${bucket#gs://}"
-    gsutil rm -r "gs://${bucket}/texts/" || true
-
-# Full cleanup: delete all test data from GCS.
-cleanup: delete-results delete-inputs
+    gsutil rm -r "gs://${bucket}/test-${TEST_RUN_ID}/" || true
 
 # Delete the GCS Kubernetes secret.
 delete-secret:
     kubectl delete secret gcs || true
 
-# Full test: create secret, upload, run, wait, check results.
+# Full test: create secret, upload, run, wait, check results, cleanup.
 test:
     #!/usr/bin/env bash
     set -euo pipefail
+    export TEST_RUN_ID="$(openssl rand -hex 4)"
+    echo "=== Test run: $TEST_RUN_ID ==="
+    
+    echo "=== Creating secret ==="
     just create-secret
+    
+    echo "=== Uploading test data ==="
     just upload
-    just delete-results || true
+    
+    echo "=== Running job ==="
     JOB_ID=$(just run | tail -1)
     echo "Job ID: $JOB_ID"
+    
+    echo "=== Waiting for job ==="
     cargo run -p falconeri -- job wait "$JOB_ID"
+    
     echo "=== Results ==="
     just results
+    
+    echo "=== Cleaning up ==="
+    just delete-test-data
+    
+    echo "=== Test passed ==="
