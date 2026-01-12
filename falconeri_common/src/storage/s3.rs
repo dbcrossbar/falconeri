@@ -3,18 +3,14 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
-use object_store::{
-    aws::AmazonS3Builder, path::Path as ObjectPath, ObjectStore, ObjectStoreExt,
-    PutPayload,
-};
+use object_store::{aws::AmazonS3Builder, path::Path as ObjectPath, ObjectStore};
 use regex::Regex;
-use tokio::{fs as async_fs, io::AsyncWriteExt};
+use tokio::fs as async_fs;
 use walkdir::WalkDir;
 
-use super::CloudStorage;
+use super::{stream_download_to_file, stream_upload_from_file, CloudStorage};
 use crate::{
     kubernetes::{
         base64_encoded_optional_secret_string, base64_encoded_secret_string,
@@ -24,16 +20,21 @@ use crate::{
     secret::Secret,
 };
 
-/// An S3 secret fetched from Kubernetes.
+/// An S3 secret fetched from Kubernetes. This can be fetched using
+/// `kubectl_secret`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 struct S3SecretData {
+    /// Our `AWS_ACCESS_KEY_ID` value.
     #[serde(with = "base64_encoded_secret_string")]
     aws_access_key_id: String,
+    /// Our `AWS_SECRET_ACCESS_KEY` value.
     #[serde(with = "base64_encoded_secret_string")]
     aws_secret_access_key: String,
+    /// Optional custom endpoint URL for S3-compatible services like MinIO.
     #[serde(default, with = "base64_encoded_optional_secret_string")]
     aws_endpoint_url: Option<String>,
+    /// Optional AWS region.
     #[serde(default, with = "base64_encoded_optional_secret_string")]
     aws_region: Option<String>,
 }
@@ -65,9 +66,12 @@ pub struct S3Storage {
 
 impl S3Storage {
     /// Create a new `S3Storage` backend.
+    ///
+    /// The `bucket_uri` parameter should be any `s3://` URI within the bucket
+    /// we want to access. The bucket name is extracted from this URI.
     #[allow(clippy::new_ret_no_self)]
     #[instrument(skip_all, level = "trace")]
-    pub async fn new(secrets: &[Secret], uri: &str) -> Result<Self> {
+    pub async fn new(secrets: &[Secret], bucket_uri: &str) -> Result<Self> {
         let secret = secrets
             .iter()
             .find(|s| matches!(s, Secret::Env { env_var, .. } if env_var == "AWS_ACCESS_KEY_ID"));
@@ -78,22 +82,25 @@ impl S3Storage {
                 None
             };
 
-        Self::build_from_secret(secret_data, uri)
+        Self::build_from_secret(secret_data, bucket_uri)
     }
 
     /// Construct a new `S3Storage` backend using an AWS access key from
     /// the Kubernetes secret `secret_name`.
+    ///
+    /// The `bucket_uri` parameter should be any `s3://` URI within the bucket
+    /// we want to access. The bucket name is extracted from this URI.
     #[instrument(skip_all, fields(secret_name = %secret_name), level = "trace")]
-    pub async fn new_with_secret(secret_name: &str, uri: &str) -> Result<Self> {
+    pub async fn new_with_secret(secret_name: &str, bucket_uri: &str) -> Result<Self> {
         let secret_data: Option<S3SecretData> = kubectl_secret(secret_name).await?;
-        Self::build_from_secret(secret_data, uri)
+        Self::build_from_secret(secret_data, bucket_uri)
     }
 
     fn build_from_secret(
         secret_data: Option<S3SecretData>,
-        uri: &str,
+        bucket_uri: &str,
     ) -> Result<Self> {
-        let (bucket, _) = parse_s3_url(uri)?;
+        let (bucket, _) = parse_s3_url(bucket_uri)?;
 
         // Use from_env() to pick up AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
         // AWS_ENDPOINT_URL, and AWS_REGION from environment variables.
@@ -174,6 +181,8 @@ impl CloudStorage for S3Storage {
         let (_, key) = parse_s3_url(uri)?;
 
         if uri.ends_with('/') {
+            // We have a directory. If our source URI ends in `/`, so should our
+            // `local_path`, since we generate these ourselves.
             async_fs::create_dir_all(local_path)
                 .await
                 .context("cannot create local download directory")?;
@@ -204,23 +213,11 @@ impl CloudStorage for S3Storage {
                         .context("cannot create local subdirectory")?;
                 }
 
-                let data = self
-                    .store
-                    .get(&meta.location)
-                    .await
-                    .context("error fetching S3 object")?
-                    .bytes()
-                    .await
-                    .context("error reading S3 object bytes")?;
-
-                let mut file = async_fs::File::create(&file_path)
-                    .await
-                    .context("cannot create local file")?;
-                file.write_all(&data)
-                    .await
-                    .context("cannot write to local file")?;
+                stream_download_to_file(&self.store, &meta.location, &file_path)
+                    .await?;
             }
         } else {
+            // We have a file.
             if let Some(parent) = local_path.parent() {
                 async_fs::create_dir_all(parent)
                     .await
@@ -228,21 +225,7 @@ impl CloudStorage for S3Storage {
             }
 
             let object_path = ObjectPath::from(key);
-            let data = self
-                .store
-                .get(&object_path)
-                .await
-                .context("error fetching S3 object")?
-                .bytes()
-                .await
-                .context("error reading S3 object bytes")?;
-
-            let mut file = async_fs::File::create(local_path)
-                .await
-                .context("cannot create local file")?;
-            file.write_all(&data)
-                .await
-                .context("cannot write to local file")?;
+            stream_download_to_file(&self.store, &object_path, local_path).await?;
         }
 
         Ok(())
@@ -271,13 +254,8 @@ impl CloudStorage for S3Storage {
                 format!("{}/{}", base_key, relative_path.to_string_lossy())
             };
 
-            let data = async_fs::read(file_path)
-                .await
-                .with_context(|| format!("cannot read local file {:?}", file_path))?;
-
             let object_path = ObjectPath::from(object_key.as_str());
-            self.store
-                .put(&object_path, PutPayload::from(Bytes::from(data)))
+            stream_upload_from_file(&self.store, file_path, &object_path)
                 .await
                 .with_context(|| format!("error uploading to S3: {}", object_key))?;
         }
