@@ -11,12 +11,12 @@ We've had good luck with the following:
 
 If you're running Kubernetes on Google's cloud, you will need:
 
-- `gsutil` for accessing Google Cloud Storage.
 - `gcloud` for working with your cluster.
+- `gsutil` (optional) for manually inspecting bucket contents during development.
 
 For other clouds, you will need to check your vendor's documentation.
 
-For all setups, you will also need:
+For all setups, you will need:
 
 - `kubectl`, compatible with your version of Kubernetes.
 - `falconeri`, which you should be able to find on the [releases page][releases].
