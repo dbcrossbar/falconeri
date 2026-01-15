@@ -27,7 +27,15 @@ upload:
 
 # Run our example job.
 run:
-    cargo run -p falconeri -- job run word-frequencies.json
+    cargo run -p falconeri -- job run word-frequencies.s3.json
+
+# Run job and wait for completion.
+run-wait:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    JOB_ID=$(just run)
+    echo "Job ID: $JOB_ID"
+    cargo run -p falconeri -- job wait "$JOB_ID"
 
 # Print results from MinIO (requires proxy running and mc-alias).
 # Output filename mirrors input: texts/foo.txt -> word-frequencies/foo.txt
@@ -37,3 +45,14 @@ results:
 # Delete results from MinIO (to verify fresh output on re-runs).
 delete-results:
     mc rm --recursive --force local/falconeri-test/word-frequencies/
+
+# Delete input texts from MinIO.
+delete-inputs:
+    mc rm --recursive --force local/falconeri-test/texts/
+
+# Full cleanup: delete all test data from MinIO.
+cleanup: delete-results delete-inputs
+
+# Full test: Upload, run, wait, check results.
+test: upload delete-results run-wait
+    just results

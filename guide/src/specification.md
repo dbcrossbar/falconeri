@@ -3,7 +3,7 @@
 Here is a sample job specification:
 
 ```json
-{{#include ../../examples/word-frequencies/word-frequencies.json}}
+{{#include ../../examples/word-frequencies/word-frequencies.s3.json}}
 ```
 
 Some notes:
