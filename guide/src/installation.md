@@ -11,12 +11,12 @@ We've had good luck with the following:
 
 If you're running Kubernetes on Google's cloud, you will need:
 
-- `gsutil` for accessing Google Cloud Storage.
 - `gcloud` for working with your cluster.
+- `gsutil` (optional) for manually inspecting bucket contents during development.
 
 For other clouds, you will need to check your vendor's documentation.
 
-For all setups, you will also need:
+For all setups, you will need:
 
 - `kubectl`, compatible with your version of Kubernetes.
 - `falconeri`, which you should be able to find on the [releases page][releases].
@@ -101,6 +101,22 @@ Finally, update your database to the latest schema:
 ```sh
 falconeri migrate
 ```
+
+## Deploying from a fork
+
+If you maintain a fork of falconeri and want to deploy your own builds:
+
+1. Fork the repository on GitHub.
+2. Push a version tag (e.g., `v2.0.0`). CI will automatically build and push your Docker image to `ghcr.io/YOUR_ORG/falconeri:v2.0.0`.
+3. Deploy with your custom image:
+
+```sh
+falconeri deploy --image ghcr.io/YOUR_ORG/falconeri:v2.0.0
+```
+
+This sets the image used for both the `falconerid` deployment and worker init containers.
+
+Note: The `--image` flag is for production deployments only and cannot be combined with `--development`.
 
 ## Setting up an HTTP ingress
 

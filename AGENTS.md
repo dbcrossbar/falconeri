@@ -32,6 +32,7 @@ This is a Cargo workspace with multiple crates:
 - `examples/word-frequencies/` - Example pipeline for testing
 - `Justfile` - Development commands
 - `deny.toml` - License and policy file for `cargo deny`
+- `lefthook.yml` - Git hooks configuration (run `lefthook install` to set up)
 
 ## Basic Theory
 
@@ -43,6 +44,10 @@ This is a Cargo workspace with multiple crates:
 - **Status flow**: `Ready` → `Running` → `Done` | `Error` | `Canceled`.
 
 ## Useful Commands
+
+Setting up the development environment:
+
+- `lefthook install`: Set up git pre-commit hooks to run `just check` automatically.
 
 Making sure code is correct:
 
@@ -74,7 +79,7 @@ For local development setup (Colima on macOS, minikube on Linux), see the [Local
 
 ### Key commands
 
-- `just static-bin`: Build static musl binaries to `target/x86_64-unknown-linux-musl/debug/`
+- `just static-bin`: Build static musl binaries to `target/x86_64-unknown-linux-musl/debug/` (rarely needed)
 - `just image`: Build the Docker image (depends on static-bin).
     - **IMPORTANT:** This creates images on the local Docker daemon with tags that _look_ like remote registry tags. But local deployment uses `imagePullPolicy: Never` to avoid pulling from a registry.
 - `cargo run -p falconeri -- deploy --development`: Deploy in development mode
@@ -94,47 +99,37 @@ Once local Kubernetes is set up and `falconeri` has been deployed to it (see [Lo
 
 ### Quick Test (from repo root)
 
-In a separate terminal, or as a background task, start the proxy (keep running):
+**Pushing new `falconeri` image to the local cluster.** If you modify `falconerid` code, you can run the following at the top level to restart a previously deployed `falconerid` with the new images:
 
 ```sh
-cargo run -p falconeri -- proxy
-```
-
-The `word-frequencies` example needs one-time setup in its directory:
-
-```sh
-cd examples/word-frequencies         # Make sure you're in the example dir
-just mc-alias                        # Configure MinIO CLI (one-time)
-just upload                          # Upload test data (one-time)
-```
-
-If you modify `falconerid` code, you can run the following at the top level to restart a previously deployed `falconerid` with the new images:
-
-```sh
-just image                                     # Rebuild Docker image
+just image                                     # Rebuild Falconeri image (from the top-level justfile!)
 kubectl rollout restart deployment/falconerid  # Redeploy to pick up changes
 kubectl rollout status deployment/falconerid   # Wait for restart to complete
 ```
 
 After a rollout restart, the proxy will automatically reconnect to the new pods (you'll see reconnection messages in the logs).
 
-If you have modified `falconeri-worker` code, you need to rebuild the static binaries and the worker image (starting at the top level):
+**Proxy.** In a separate terminal, or as a background task, start the proxy (keep running):
 
 ```sh
-just static-bin               # Rebuild static binaries
-cd examples/word-frequencies  # Make sure you're in the example dir
-just image                    # Rebuild word-frequencies Docker image
+cargo run -p falconeri -- proxy
 ```
 
-Then, from the `examples/word-frequencies/` directory, you can run the job:
+**Setting up word-frequencies.** The `word-frequencies` example needs one-time setup in its directory:
 
 ```sh
-just delete-results                  # Clean up previous results
-just run                             # Run the job (jobs run once, so you'll always need a fresh one to test)
-just results                         # View output
+cd examples/word-frequencies         # Make sure you're in the example dir
+just mc-alias                        # Configure MinIO CLI (one-time)
 ```
 
-The test passes when `just results` shows word frequency counts (e.g., "the 42", "and 28"). For re-runs, use `just delete-results` first.
+**Running word-frequencies.** Then, from the `examples/word-frequencies/` directory, you can run the job:
+
+```sh
+just image                    # Rebuild word-frequencies Docker image (if changed or missing)
+just test                     # Run the local MinIO end-to-end test
+```
+
+The test passes when `just test` shows word frequency counts (e.g., "the 42", "and 28"). If something goes wrong, you can look at the definition of `just test` and try running the individual steps to investigate the failure.
 
 ## Guide Documentation
 

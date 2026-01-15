@@ -1,0 +1,81 @@
+# GCS end-to-end test for falconeri.
+#
+# Prerequisites:
+# 1. Set GOOGLE_APPLICATION_CREDENTIALS to your service account key file path
+# 2. Have gcloud/gsutil installed and authenticated
+# 3. Have the word-frequencies Docker image built (run `just image`)
+# 4. Have falconeri deployed and proxy running
+#
+# Override bucket: just -f justfile.gcs GCS_BUCKET=my-bucket upload
+
+# Bucket name (without gs:// prefix)
+GCS_BUCKET := "faraday-falconeri-test"
+
+# Build the word-frequencies Docker image.
+image:
+    # Delegate to the base justfile.
+    just image
+
+# Set up a proxy.
+proxy:
+    # Delegate to the base justfile.
+    just proxy
+
+# Create Kubernetes secret for GCS credentials from GOOGLE_APPLICATION_CREDENTIALS file.
+create-secret:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]]; then
+        echo "Error: GOOGLE_APPLICATION_CREDENTIALS environment variable not set"
+        echo "Set it to the path of your service account key JSON file"
+        exit 1
+    fi
+    if [[ ! -f "$GOOGLE_APPLICATION_CREDENTIALS" ]]; then
+        echo "Error: File not found: $GOOGLE_APPLICATION_CREDENTIALS"
+        exit 1
+    fi
+    # Delete existing secret if present (ignore errors)
+    kubectl delete secret gcs 2>/dev/null || true
+    # Create new secret with the JSON content
+    kubectl create secret generic gcs \
+        --from-file=GOOGLE_SERVICE_ACCOUNT_KEY="$GOOGLE_APPLICATION_CREDENTIALS"
+    echo "Created Kubernetes secret 'gcs' from $GOOGLE_APPLICATION_CREDENTIALS"
+
+# Delete the GCS Kubernetes secret.
+delete-secret:
+    kubectl delete secret gcs || true
+
+# Upload test texts to GCS.
+upload:
+    gsutil cp texts/*.txt "gs://{{GCS_BUCKET}}/texts/"
+
+# Run the GCS example job.
+run:
+    sed "s/falconeri-test/{{GCS_BUCKET}}/g" word-frequencies.gcs.json > /tmp/word-frequencies-gcs-run.json
+    cargo run -p falconeri -- job run /tmp/word-frequencies-gcs-run.json
+
+# Run job and wait for completion.
+run-wait:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    JOB_ID=$(just -f justfile.gcs GCS_BUCKET={{GCS_BUCKET}} run)
+    echo "Job ID: $JOB_ID"
+    cargo run -p falconeri -- job wait "$JOB_ID"
+
+# Print results from GCS.
+results:
+    gsutil cat "gs://{{GCS_BUCKET}}/word-frequencies/buffalo-public-library-1883.txt" | head -20
+
+# Delete results from GCS (to verify fresh output on re-runs).
+delete-results:
+    gsutil rm -r "gs://{{GCS_BUCKET}}/word-frequencies/" || true
+
+# Delete input texts from GCS.
+delete-inputs:
+    gsutil rm -r "gs://{{GCS_BUCKET}}/texts/" || true
+
+# Full cleanup: delete all test data from GCS.
+cleanup: delete-results delete-inputs
+
+# Full test: Upload, run, wait, check results.
+test: upload delete-results run-wait results

@@ -20,20 +20,25 @@ If your pipeline JSON contains the following input section:
 
 ## Required executables
 
-Your Docker image must contain both `gsutil` (assuming you're using Google Cloud Storage) and `falconeri-worker` somewhere in your `$PATH`. You can install `gsutil` on an Ubuntu image as follows:
+As of falconeri 2.0, your Docker image only needs to contain your data processing tools. The `falconeri-worker` binary is automatically injected into your container at job startup via a Kubernetes init container, ensuring version consistency with the server.
+
+Cloud storage operations (S3, GCS) are handled natively by `falconeri-worker` using the Rust `object_store` crate—no need to install `gsutil`, `aws`, or other CLI tools.
+
+A minimal worker image needs only:
+
+- `ca-certificates` for HTTPS connections (if your base image doesn't include them)
+- Your data processing script or binary
+
+### Example Dockerfile
 
 ```Dockerfile
-RUN export CLOUD_SDK_REPO="cloud-sdk-$(lsb_release -c -s)" && \
-    echo "deb http://packages.cloud.google.com/apt $CLOUD_SDK_REPO main" | \
-        tee -a /etc/apt/sources.list.d/google-cloud-sdk.list && \
-    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | \
-        apt-key add - && \
-    apt-get update && apt-get install -y google-cloud-sdk && \
+FROM ubuntu:20.04
+
+RUN apt-get update && \
+    apt-get install -y ca-certificates && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
+
+ADD my-processing-script.sh /usr/local/bin/
 ```
 
-You can install `falconeri-worker` by downloading the latest [release][] and copying `falconeri-worker` to `/usr/local/bin`, or another directory in your `$PATH`. This is a statically-linked Linux binary, so it should work on any reasonably modern Linux distro.
-
-TODO: Add example of installing `falconeri-worker`.
-
-[release]: https://github.com/dbcrossbar/falconeri/releases
+See the [word-frequencies example](https://github.com/dbcrossbar/falconeri/tree/main/examples/word-frequencies) for a complete working example.

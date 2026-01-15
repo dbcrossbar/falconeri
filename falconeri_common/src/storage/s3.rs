@@ -1,14 +1,16 @@
-//! Support for AWS S3 storage.
+//! Support for AWS S3 storage using the native object_store crate.
 
-use std::{fs, process::Stdio};
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::TryStreamExt;
 use lazy_static::lazy_static;
+use object_store::{aws::AmazonS3Builder, path::Path as ObjectPath, ObjectStore};
 use regex::Regex;
-use serde_json;
-use tokio::process::Command;
+use tokio::fs as async_fs;
+use walkdir::WalkDir;
 
-use super::CloudStorage;
+use super::{stream_download_to_file, stream_upload_from_file, CloudStorage};
 use crate::{
     kubernetes::{
         base64_encoded_optional_secret_string, base64_encoded_secret_string,
@@ -19,7 +21,7 @@ use crate::{
 };
 
 /// An S3 secret fetched from Kubernetes. This can be fetched using
-/// `kubernetes_secret`.
+/// `kubectl_secret`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 struct S3SecretData {
@@ -32,176 +34,13 @@ struct S3SecretData {
     /// Optional custom endpoint URL for S3-compatible services like MinIO.
     #[serde(default, with = "base64_encoded_optional_secret_string")]
     aws_endpoint_url: Option<String>,
+    /// Optional AWS region.
+    #[serde(default, with = "base64_encoded_optional_secret_string")]
+    aws_region: Option<String>,
 }
 
-/// Backend for talking to AWS S3, currently based on `awscli`.
-pub struct S3Storage {
-    secret_data: Option<S3SecretData>,
-}
-
-impl S3Storage {
-    /// Create a new `S3Storage` backend.
-    #[allow(clippy::new_ret_no_self)]
-    #[instrument(skip_all, level = "trace")]
-    pub async fn new(secrets: &[Secret]) -> Result<Self> {
-        let secret = secrets.iter().find(|s| {
-            matches!(s, Secret::Env { env_var, .. } if env_var == "AWS_ACCESS_KEY_ID")
-        });
-        let secret_data = if let Some(Secret::Env { name, .. }) = secret {
-            Some(kubectl_secret(name).await?)
-        } else {
-            None
-        };
-        Ok(S3Storage { secret_data })
-    }
-
-    /// Construct a new `S3Storage` backend, using an AWS access key from
-    /// the Kubernetes secret `secret_name`.
-    #[instrument(skip_all, fields(secret_name = %secret_name), level = "trace")]
-    pub async fn new_with_secret(secret_name: &str) -> Result<Self> {
-        Ok(S3Storage {
-            secret_data: kubectl_secret(secret_name).await?,
-        })
-    }
-
-    /// Build a `Command` object which calls the `aws` CLI tool, including any
-    /// authentication that we happen to have.
-    #[instrument(skip_all, level = "trace")]
-    fn aws_command(&self) -> Command {
-        let mut command = Command::new("aws");
-        if let Some(secret_data) = &self.secret_data {
-            command.env("AWS_ACCESS_KEY_ID", &secret_data.aws_access_key_id);
-            command.env("AWS_SECRET_ACCESS_KEY", &secret_data.aws_secret_access_key);
-            // Support custom S3-compatible endpoints (e.g., MinIO).
-            if let Some(endpoint_url) = &secret_data.aws_endpoint_url {
-                command.args(["--endpoint-url", endpoint_url]);
-            }
-        }
-        command
-    }
-}
-
-impl fmt::Debug for S3Storage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Don't include secrets in the debug output, for trace mode.
-        f.debug_struct("S3Storage").finish()
-    }
-}
-
-#[async_trait]
-impl CloudStorage for S3Storage {
-    #[instrument(skip_all, fields(uri = %uri), level = "trace")]
-    async fn list(&self, uri: &str) -> Result<Vec<String>> {
-        trace!("listing {}", uri);
-
-        let (bucket, key) = parse_s3_url(uri)?;
-        let mut prefix = key.to_owned();
-        if !key.is_empty() && !key.ends_with('/') {
-            prefix.push('/');
-        }
-
-        // Use `aws` to list our bucket, and parse the results.
-        let output = self
-            .aws_command()
-            .args(["s3api", "list-objects-v2"])
-            .arg("--bucket")
-            .arg(bucket)
-            .arg("--prefix")
-            .arg(prefix.clone())
-            .stderr(Stdio::inherit())
-            .output()
-            .await
-            .context("could not run aws")?;
-        if !output.status.success() {
-            return Err(format_err!("could not list {:?}: {}", uri, output.status));
-        }
-        let s3_output: ListObjectsV2Output = serde_json::from_slice(&output.stdout)
-            .context("error parsing list-objects-v2 output")?;
-
-        // Fail if the bucket has too many entries to get in one call.
-        //
-        // TODO: Chain together multiple calls to `list-objects-v2`.
-        if s3_output.is_truncated.unwrap_or(false) {
-            return Err(format_err!(
-                "S3 prefix {:?} contains too many objects for this version",
-                uri,
-            ));
-        }
-
-        Ok(s3_output
-            .contents
-            .into_iter()
-            // Remove the directory itself.
-            .filter(|obj| obj.key != prefix)
-            // Convert to URLs.
-            .map(|obj| format!("s3://{}/{}", bucket, obj.key))
-            .collect::<Vec<_>>())
-    }
-
-    #[instrument(skip_all, fields(uri = %uri, local_path = %local_path.display()), level = "trace")]
-    async fn sync_down(&self, uri: &str, local_path: &Path) -> Result<()> {
-        trace!("downloading {} to {}", uri, local_path.display());
-        if uri.ends_with('/') {
-            fs::create_dir_all(local_path)
-                .context("cannot create local download directory")?;
-            let status = self
-                .aws_command()
-                .args(["s3", "sync", "--quiet"])
-                .arg(uri)
-                .arg(local_path)
-                .status()
-                .await
-                .context("could not run aws s3")?;
-            if !status.success() {
-                return Err(format_err!("could not download {:?}: {}", uri, status));
-            }
-        } else {
-            if let Some(parent) = local_path.parent() {
-                fs::create_dir_all(parent)
-                    .context("cannot create local download directory")?;
-            }
-            let status = self
-                .aws_command()
-                .args(["s3", "cp"])
-                .arg(uri)
-                .arg(local_path)
-                .status()
-                .await
-                .context("could not run aws s3")?;
-            if !status.success() {
-                return Err(format_err!("could not download {:?}: {}", uri, status));
-            }
-        }
-        Ok(())
-    }
-
-    #[instrument(skip_all, fields(local_path = %local_path.display(), uri = %uri), level = "trace")]
-    async fn sync_up(&self, local_path: &Path, uri: &str) -> Result<()> {
-        trace!("uploading {} to {}", local_path.display(), uri);
-
-        // We assume that we only need to support directories, namely /pfs/out.
-        let status = self
-            .aws_command()
-            .args(["s3", "sync", "--quiet"])
-            .arg(local_path)
-            .arg(uri)
-            .status()
-            .await
-            .context("could not run aws s3")?;
-        if !status.success() {
-            return Err(format_err!(
-                "could not upload {:?}: {}",
-                local_path.display(),
-                status,
-            ));
-        }
-        Ok(())
-    }
-}
-
-/// Parse an S3 URL.
+/// Parse an S3 URL into (bucket, key).
 fn parse_s3_url(url: &str) -> Result<(&str, &str)> {
-    // lazy_static allows us to compile this regex only once.
     lazy_static! {
         static ref RE: Regex = Regex::new("^s3://(?P<bucket>[^/]+)(?:/(?P<key>.*))?$")
             .expect("couldn't parse built-in regex");
@@ -219,6 +58,212 @@ fn parse_s3_url(url: &str) -> Result<(&str, &str)> {
     Ok((bucket, key))
 }
 
+/// Backend for talking to AWS S3 using native Rust (no external CLI).
+pub struct S3Storage {
+    store: Arc<dyn ObjectStore>,
+    bucket: String,
+}
+
+impl S3Storage {
+    /// Create a new `S3Storage` backend.
+    ///
+    /// The `bucket_uri` parameter should be any `s3://` URI within the bucket
+    /// we want to access. The bucket name is extracted from this URI.
+    #[allow(clippy::new_ret_no_self)]
+    #[instrument(skip_all, level = "trace")]
+    pub async fn new(secrets: &[Secret], bucket_uri: &str) -> Result<Self> {
+        let secret = secrets
+            .iter()
+            .find(|s| matches!(s, Secret::Env { env_var, .. } if env_var == "AWS_ACCESS_KEY_ID"));
+        let secret_data: Option<S3SecretData> =
+            if let Some(Secret::Env { name, .. }) = secret {
+                Some(kubectl_secret(name).await?)
+            } else {
+                None
+            };
+
+        Self::build_from_secret(secret_data, bucket_uri)
+    }
+
+    /// Construct a new `S3Storage` backend using an AWS access key from
+    /// the Kubernetes secret `secret_name`.
+    ///
+    /// The `bucket_uri` parameter should be any `s3://` URI within the bucket
+    /// we want to access. The bucket name is extracted from this URI.
+    #[instrument(skip_all, fields(secret_name = %secret_name), level = "trace")]
+    pub async fn new_with_secret(secret_name: &str, bucket_uri: &str) -> Result<Self> {
+        let secret_data: Option<S3SecretData> = kubectl_secret(secret_name).await?;
+        Self::build_from_secret(secret_data, bucket_uri)
+    }
+
+    fn build_from_secret(
+        secret_data: Option<S3SecretData>,
+        bucket_uri: &str,
+    ) -> Result<Self> {
+        let (bucket, _) = parse_s3_url(bucket_uri)?;
+
+        // Use from_env() to pick up AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+        // AWS_ENDPOINT_URL, and AWS_REGION from environment variables.
+        let mut builder = AmazonS3Builder::from_env()
+            .with_bucket_name(bucket)
+            .with_allow_http(true);
+
+        if let Some(ref secret) = secret_data {
+            builder = builder
+                .with_access_key_id(&secret.aws_access_key_id)
+                .with_secret_access_key(&secret.aws_secret_access_key);
+
+            if let Some(ref endpoint_url) = secret.aws_endpoint_url {
+                builder = builder.with_endpoint(endpoint_url);
+            }
+
+            if let Some(ref region) = secret.aws_region {
+                builder = builder.with_region(region);
+            }
+        }
+
+        let store = builder.build().context("failed to build S3 client")?;
+
+        Ok(S3Storage {
+            store: Arc::new(store),
+            bucket: bucket.to_owned(),
+        })
+    }
+}
+
+impl fmt::Debug for S3Storage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S3Storage")
+            .field("bucket", &self.bucket)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl CloudStorage for S3Storage {
+    #[instrument(skip_all, fields(uri = %uri), level = "trace")]
+    async fn list(&self, uri: &str) -> Result<Vec<String>> {
+        trace!("listing {}", uri);
+
+        let (bucket, key) = parse_s3_url(uri)?;
+        let mut prefix = key.to_owned();
+        if !key.is_empty() && !key.ends_with('/') {
+            prefix.push('/');
+        }
+
+        let prefix_path = if prefix.is_empty() {
+            None
+        } else {
+            Some(ObjectPath::from(prefix.as_str()))
+        };
+
+        let mut results = Vec::new();
+        let mut stream = self.store.list(prefix_path.as_ref());
+
+        while let Some(meta) = stream
+            .try_next()
+            .await
+            .context("error listing S3 objects")?
+        {
+            let path_str = meta.location.to_string();
+            if path_str != prefix {
+                results.push(format!("s3://{}/{}", bucket, path_str));
+            }
+        }
+
+        Ok(results)
+    }
+
+    #[instrument(skip_all, fields(uri = %uri, local_path = %local_path.display()), level = "trace")]
+    async fn sync_down(&self, uri: &str, local_path: &Path) -> Result<()> {
+        trace!("downloading {} to {}", uri, local_path.display());
+
+        let (_, key) = parse_s3_url(uri)?;
+
+        if uri.ends_with('/') {
+            // We have a directory. If our source URI ends in `/`, so should our
+            // `local_path`, since we generate these ourselves.
+            async_fs::create_dir_all(local_path)
+                .await
+                .context("cannot create local download directory")?;
+
+            let prefix = ObjectPath::from(key);
+            let mut stream = self.store.list(Some(&prefix));
+
+            while let Some(meta) = stream
+                .try_next()
+                .await
+                .context("error listing S3 objects")?
+            {
+                let object_key = meta.location.to_string();
+                let relative_path = object_key
+                    .strip_prefix(key)
+                    .unwrap_or(&object_key)
+                    .trim_start_matches('/');
+
+                if relative_path.is_empty() {
+                    continue;
+                }
+
+                let file_path = local_path.join(relative_path);
+
+                if let Some(parent) = file_path.parent() {
+                    async_fs::create_dir_all(parent)
+                        .await
+                        .context("cannot create local subdirectory")?;
+                }
+
+                stream_download_to_file(&self.store, &meta.location, &file_path)
+                    .await?;
+            }
+        } else {
+            // We have a file.
+            if let Some(parent) = local_path.parent() {
+                async_fs::create_dir_all(parent)
+                    .await
+                    .context("cannot create local download directory")?;
+            }
+
+            let object_path = ObjectPath::from(key);
+            stream_download_to_file(&self.store, &object_path, local_path).await?;
+        }
+
+        Ok(())
+    }
+
+    #[instrument(skip_all, fields(local_path = %local_path.display(), uri = %uri), level = "trace")]
+    async fn sync_up(&self, local_path: &Path, uri: &str) -> Result<()> {
+        trace!("uploading {} to {}", local_path.display(), uri);
+
+        let (_, key) = parse_s3_url(uri)?;
+        let base_key = key.trim_end_matches('/');
+
+        for entry in WalkDir::new(local_path).into_iter().filter_map(|e| e.ok()) {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+
+            let file_path = entry.path();
+            let relative_path = file_path
+                .strip_prefix(local_path)
+                .context("failed to compute relative path")?;
+
+            let object_key = if base_key.is_empty() {
+                relative_path.to_string_lossy().to_string()
+            } else {
+                format!("{}/{}", base_key, relative_path.to_string_lossy())
+            };
+
+            let object_path = ObjectPath::from(object_key.as_str());
+            stream_upload_from_file(&self.store, file_path, &object_path)
+                .await
+                .with_context(|| format!("error uploading to S3: {}", object_key))?;
+        }
+
+        Ok(())
+    }
+}
+
 #[test]
 fn url_parsing() {
     assert_eq!(parse_s3_url("s3://top-level").unwrap(), ("top-level", ""));
@@ -232,26 +277,4 @@ fn url_parsing() {
         ("top-level", "path/")
     );
     assert!(parse_s3_url("gs://foo/").is_err());
-}
-
-/// Local, `serde`-compatible reimplementation of
-/// [`rusoto_s3::ListObjectsV2Output`][rusoto].
-///
-/// [rusoto]:
-/// https://rusoto.github.io/rusoto/rusoto_s3/struct.ListObjectsV2Output.html
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct ListObjectsV2Output {
-    #[serde(default)]
-    contents: Vec<Object>,
-    is_truncated: Option<bool>,
-}
-
-/// Local, `serde`-compatible reimplementation of [`rusoto_s3::Output`][rusoto].
-///
-/// [rusoto]: https://rusoto.github.io/rusoto/rusoto_s3/struct.Object.html
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct Object {
-    key: String,
 }

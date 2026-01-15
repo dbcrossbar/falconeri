@@ -1,0 +1,40 @@
+{
+    "pipeline": {
+        "name": "word_frequencies_gcs"
+    },
+    "transform": {
+        "image": "word-frequencies",
+        "image_pull_policy": "Never",
+        "cmd": [
+            "word-frequencies.sh"
+        ],
+        "env": {
+            "RUST_LOG": "falconeri_common=debug,falconeri_worker=debug,info"
+        },
+        "secrets": [
+            {
+                "name": "gcs",
+                "key": "GOOGLE_SERVICE_ACCOUNT_KEY",
+                "env_var": "GOOGLE_SERVICE_ACCOUNT_KEY"
+            }
+        ]
+    },
+    "parallelism_spec": {
+        "constant": 1
+    },
+    "resource_requests": {
+        "memory": "128Mi",
+        "cpu": 0.1
+    },
+    "datum_tries": 3,
+    "input": {
+        "atom": {
+          "repo": "texts",
+          "URI": "gs://falconeri-test/texts/",
+          "glob": "/*"
+        }
+    },
+    "egress": {
+        "URI": "gs://falconeri-test/word-frequencies/"
+    }
+}

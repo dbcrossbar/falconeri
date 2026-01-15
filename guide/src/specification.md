@@ -3,7 +3,7 @@
 Here is a sample job specification:
 
 ```json
-{{#include ../../examples/word-frequencies/word-frequencies.json}}
+{{#include ../../examples/word-frequencies/word-frequencies.s3.json}}
 ```
 
 Some notes:
@@ -33,4 +33,42 @@ In order to authenticate with S3, you will need to create a secret, and add a `t
     "env_var": "AWS_SECRET_ACCESS_KEY"
   }
 ]
+```
+
+## GCS authentication
+
+For Google Cloud Storage, create a Kubernetes secret containing your service account key JSON, then reference it in your pipeline specification.
+
+First, create the secret from your service account key file:
+
+```bash
+kubectl create secret generic gcs \
+    --from-file=GOOGLE_SERVICE_ACCOUNT_KEY=/path/to/service-account-key.json
+```
+
+Then add this to your pipeline specification:
+
+```json
+"secrets": [
+  {
+    "name": "gcs",
+    "key": "GOOGLE_SERVICE_ACCOUNT_KEY",
+    "env_var": "GOOGLE_SERVICE_ACCOUNT_KEY"
+  }
+]
+```
+
+Your input and egress URIs should use the `gs://` scheme:
+
+```json
+"input": {
+    "atom": {
+        "repo": "my-data",
+        "URI": "gs://my-bucket/inputs/",
+        "glob": "/*"
+    }
+},
+"egress": {
+    "URI": "gs://my-bucket/outputs/"
+}
 ```

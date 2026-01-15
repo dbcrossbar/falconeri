@@ -75,6 +75,8 @@ struct Config {
     minio_memory: String,
     /// The number of CPUs to request for MinIO.
     minio_cpu: String,
+    /// The full container image reference for falconeri.
+    image: String,
 }
 
 /// Parameters used to generate a deploy manifest.
@@ -155,6 +157,12 @@ pub struct Opt {
     /// The number of CPUs to request for MinIO.
     #[arg(long = "minio-cpu")]
     minio_cpu: Option<String>,
+
+    /// Custom container image for falconeri (production only).
+    /// Use this to deploy from a forked repository's CI-built image.
+    /// Example: ghcr.io/myorg/falconeri:v2.0.0
+    #[arg(long = "image", conflicts_with = "development")]
+    image: Option<String>,
 }
 
 /// Deploy `falconeri` to the current Kubernetes cluster.
@@ -209,6 +217,9 @@ pub async fn run(opt: &Opt) -> Result<()> {
     }
     if let Some(minio_cpu) = &opt.minio_cpu {
         config.minio_cpu = minio_cpu.to_owned();
+    }
+    if let Some(image) = &opt.image {
+        config.image = image.to_owned();
     }
 
     // Check which secrets need to be created (only if they don't already exist).
@@ -298,6 +309,10 @@ fn default_config(development: bool) -> Config {
             minio_storage: "256Mi".to_string(),
             minio_memory: "256Mi".to_string(),
             minio_cpu: "100m".to_string(),
+            image: format!(
+                "ghcr.io/dbcrossbar/falconeri:{}",
+                env!("CARGO_PKG_VERSION")
+            ),
         }
     } else {
         Config {
@@ -318,6 +333,10 @@ fn default_config(development: bool) -> Config {
             minio_storage: "10Gi".to_string(),
             minio_memory: "512Mi".to_string(),
             minio_cpu: "250m".to_string(),
+            image: format!(
+                "ghcr.io/dbcrossbar/falconeri:{}",
+                env!("CARGO_PKG_VERSION")
+            ),
         }
     }
 }

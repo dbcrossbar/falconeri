@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added GCS (Google Cloud Storage) authentication support with three options:
+  - **GKE Workload Identity / metadata service**: Automatic authentication when running on GKE with workload identity configured
+  - **`GOOGLE_APPLICATION_CREDENTIALS`**: Standard environment variable pointing to a service account key file path (used by `object_store` library)
+  - **`GOOGLE_SERVICE_ACCOUNT_KEY`**: Inline JSON content of service account key (for Kubernetes secrets mounted as env vars in worker pods). This is the standard env var used by the `object_store` crate.
+- Added GCS end-to-end test example in `examples/word-frequencies/`
+- Fork support: Added `--image` flag to `falconeri deploy` to specify a custom container image, enabling deployment from forked repositories. This flag is for production deployments only (mutually exclusive with `--development`).
+- Fork support: CI workflow now uses `github.repository_owner` variable, so forks automatically build and push images to their own container registry.
+
+### Changed
+
+- Replaced `gsutil` and `aws` CLIs with native Rust `object_store` crate for cloud storage operations. This means smaller worker images and better error handling.
+- Removed Google Cloud SDK and `aws-cli` from Docker image, reducing image size by ~500MB. Cloud storage is now handled natively by the Rust binaries.
+
 ## [2.0.0-alpha.4] - 2026-01-11
 
 ### Fixed
