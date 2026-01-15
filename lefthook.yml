@@ -1,0 +1,8 @@
+# Lefthook configuration for git hooks
+# Install: lefthook install
+# See: https://github.com/evilmartians/lefthook
+
+pre-commit:
+  commands:
+    check:
+      run: just check

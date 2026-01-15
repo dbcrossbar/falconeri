@@ -32,6 +32,7 @@ This is a Cargo workspace with multiple crates:
 - `examples/word-frequencies/` - Example pipeline for testing
 - `Justfile` - Development commands
 - `deny.toml` - License and policy file for `cargo deny`
+- `lefthook.yml` - Git hooks configuration (run `lefthook install` to set up)
 
 ## Basic Theory
 
@@ -43,6 +44,10 @@ This is a Cargo workspace with multiple crates:
 - **Status flow**: `Ready` → `Running` → `Done` | `Error` | `Canceled`.
 
 ## Useful Commands
+
+Setting up the development environment:
+
+- `lefthook install`: Set up git pre-commit hooks to run `just check` automatically.
 
 Making sure code is correct:
 
