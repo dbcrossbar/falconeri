@@ -1,4 +1,4 @@
-# This `justfile` should allow you to run a debug build of `falconeri` on a
+# This `Justfile` should allow you to run a debug build of `falconeri` on a
 # local k8s cluster. See the guide for instructions on how to set up a local
 # cluster (on Mac or Linux), and how to point your `kubectl` at it.
 #

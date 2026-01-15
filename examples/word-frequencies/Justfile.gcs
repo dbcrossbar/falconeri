@@ -6,19 +6,19 @@
 # 3. Have the word-frequencies Docker image built (run `just image`)
 # 4. Have falconeri deployed and proxy running
 #
-# Override bucket: just -f justfile.gcs GCS_BUCKET=my-bucket upload
+# Override bucket: just -f Justfile.gcs GCS_BUCKET=my-bucket upload
 
 # Bucket name (without gs:// prefix)
 GCS_BUCKET := "faraday-falconeri-test"
 
 # Build the word-frequencies Docker image.
 image:
-    # Delegate to the base justfile.
+    # Delegate to the base Justfile.
     just image
 
 # Set up a proxy.
 proxy:
-    # Delegate to the base justfile.
+    # Delegate to the base Justfile.
     just proxy
 
 # Create Kubernetes secret for GCS credentials from GOOGLE_APPLICATION_CREDENTIALS file.
@@ -58,7 +58,7 @@ run:
 run-wait:
     #!/usr/bin/env bash
     set -euo pipefail
-    JOB_ID=$(just -f justfile.gcs GCS_BUCKET={{GCS_BUCKET}} run)
+    JOB_ID=$(just -f Justfile.gcs GCS_BUCKET={{GCS_BUCKET}} run)
     echo "Job ID: $JOB_ID"
     cargo run -p falconeri -- job wait "$JOB_ID"
 

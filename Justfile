@@ -1,4 +1,4 @@
-# This is a `justfile`, which is sort of like a less crufty makefile.
+# This is a `Justfile`, which is sort of like a less crufty makefile.
 # It's processed using https://github.com/casey/just, which you can
 # install using `cargo install -f just`.
 #

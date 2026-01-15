@@ -30,20 +30,20 @@ Requires `GOOGLE_APPLICATION_CREDENTIALS` env var and `gsutil`.
 One-time setup:
 
 ```sh
-just -f justfile.gcs create-secret  # Create K8s secret from credentials
+just -f Justfile.gcs create-secret  # Create K8s secret from credentials
 ```
 
 Running:
 
 ```sh
-just -f justfile.gcs image                       # Build Docker image (run after changes)
-just -f justfile.gcs GCS_BUCKET=my-bucket test   # Upload, run job, show results
+just -f Justfile.gcs image                       # Build Docker image (run after changes)
+just -f Justfile.gcs GCS_BUCKET=my-bucket test   # Upload, run job, show results
 ```
 
 ## Files
 
 - `word-frequencies.s3.json` / `word-frequencies.gcs.json` - Pipeline specs
-- `justfile` / `justfile.gcs` - Test commands
+- `Justfile` / `Justfile.gcs` - Test commands
 - `texts/` - Sample input texts
 - `word-frequencies.sh` - Worker script
 - `Dockerfile` - Worker image

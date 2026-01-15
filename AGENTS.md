@@ -102,7 +102,7 @@ Once local Kubernetes is set up and `falconeri` has been deployed to it (see [Lo
 **Pushing new `falconeri` image to the local cluster.** If you modify `falconerid` code, you can run the following at the top level to restart a previously deployed `falconerid` with the new images:
 
 ```sh
-just image                                     # Rebuild Falconeri image (from the top-level justfile!)
+just image                                     # Rebuild Falconeri image (from the top-level Justfile!)
 kubectl rollout restart deployment/falconerid  # Redeploy to pick up changes
 kubectl rollout status deployment/falconerid   # Wait for restart to complete
 ```

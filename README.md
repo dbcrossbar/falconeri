@@ -38,7 +38,7 @@ cargo install cargo-edit
 cargo install diesel_cli
 ```
 
-Next, check out the available tasks in the `justfile`:
+Next, check out the available tasks in the `Justfile`:
 
 ```sh
 just --list
