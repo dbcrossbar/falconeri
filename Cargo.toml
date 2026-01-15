@@ -8,7 +8,6 @@ edition = "2018"
 license = "Apache-2.0 OR MIT"
 
 [workspace.dependencies]
-bytes = "1.0"
 futures = "0.3"
 object_store = { git = "https://github.com/apache/arrow-rs-object-store.git", features = ["aws", "gcp", "fs"] }
 serde = { version = "1.0.70", features = ["derive"] }

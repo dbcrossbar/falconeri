@@ -756,7 +756,6 @@ dependencies = [
  "async-trait",
  "backon",
  "base64",
- "bytes",
  "cast",
  "chrono",
  "diesel",
