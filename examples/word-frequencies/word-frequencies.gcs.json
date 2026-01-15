@@ -14,8 +14,8 @@
         "secrets": [
             {
                 "name": "gcs",
-                "key": "GOOGLE_APPLICATION_CREDENTIALS_JSON",
-                "env_var": "GOOGLE_APPLICATION_CREDENTIALS_JSON"
+                "key": "GOOGLE_SERVICE_ACCOUNT_KEY",
+                "env_var": "GOOGLE_SERVICE_ACCOUNT_KEY"
             }
         ]
     },

@@ -24,7 +24,7 @@ use crate::{
 #[serde(deny_unknown_fields)]
 struct GcsSecretData {
     #[serde(default, with = "base64_encoded_optional_secret_string")]
-    #[serde(rename = "GOOGLE_APPLICATION_CREDENTIALS_JSON")]
+    #[serde(rename = "GOOGLE_SERVICE_ACCOUNT_KEY")]
     service_account_key: Option<String>,
 }
 
@@ -63,7 +63,7 @@ impl GoogleCloudStorage {
     pub async fn new(secrets: &[Secret], bucket_uri: &str) -> Result<Self> {
         let secret = secrets
             .iter()
-            .find(|s| matches!(s, Secret::Env { env_var, .. } if env_var == "GOOGLE_APPLICATION_CREDENTIALS_JSON"));
+            .find(|s| matches!(s, Secret::Env { env_var, .. } if env_var == "GOOGLE_SERVICE_ACCOUNT_KEY"));
         let secret_data: Option<GcsSecretData> =
             if let Some(Secret::Env { name, .. }) = secret {
                 kubectl_secret(name).await?
@@ -89,7 +89,7 @@ impl GoogleCloudStorage {
                 builder = builder.with_service_account_key(service_account_key);
             }
         } else if let Ok(service_account_key) =
-            std::env::var("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+            std::env::var("GOOGLE_SERVICE_ACCOUNT_KEY")
         {
             // Fall back to environment variable (used by worker pods where
             // secrets are mounted as env vars).

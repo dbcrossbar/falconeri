@@ -38,7 +38,7 @@ create-secret:
     kubectl delete secret gcs 2>/dev/null || true
     # Create new secret with the JSON content
     kubectl create secret generic gcs \
-        --from-file=GOOGLE_APPLICATION_CREDENTIALS_JSON="$GOOGLE_APPLICATION_CREDENTIALS"
+        --from-file=GOOGLE_SERVICE_ACCOUNT_KEY="$GOOGLE_APPLICATION_CREDENTIALS"
     echo "Created Kubernetes secret 'gcs' from $GOOGLE_APPLICATION_CREDENTIALS"
 
 # Delete the GCS Kubernetes secret.

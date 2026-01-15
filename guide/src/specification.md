@@ -43,7 +43,7 @@ First, create the secret from your service account key file:
 
 ```bash
 kubectl create secret generic gcs \
-    --from-file=GOOGLE_APPLICATION_CREDENTIALS_JSON=/path/to/service-account-key.json
+    --from-file=GOOGLE_SERVICE_ACCOUNT_KEY=/path/to/service-account-key.json
 ```
 
 Then add this to your pipeline specification:
@@ -52,8 +52,8 @@ Then add this to your pipeline specification:
 "secrets": [
   {
     "name": "gcs",
-    "key": "GOOGLE_APPLICATION_CREDENTIALS_JSON",
-    "env_var": "GOOGLE_APPLICATION_CREDENTIALS_JSON"
+    "key": "GOOGLE_SERVICE_ACCOUNT_KEY",
+    "env_var": "GOOGLE_SERVICE_ACCOUNT_KEY"
   }
 ]
 ```
