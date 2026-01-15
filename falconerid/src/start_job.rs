@@ -185,8 +185,9 @@ struct JobParams<'a> {
 impl<'a> JobParams<'a> {
     fn new(pipeline_spec: &'a PipelineSpec, job: &'a Job) -> JobParams<'a> {
         let job_timeout = pipeline_spec.job_timeout.map(|timeout| timeout.as_secs());
-        let falconeri_image =
-            format!("ghcr.io/dbcrossbar/falconeri:{}", env!("CARGO_PKG_VERSION"));
+        let falconeri_image = std::env::var("FALCONERI_IMAGE").unwrap_or_else(|_| {
+            format!("ghcr.io/dbcrossbar/falconeri:{}", env!("CARGO_PKG_VERSION"))
+        });
         let use_local_image = kubernetes::use_local_image();
         Self {
             pipeline_spec,

@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **`GOOGLE_APPLICATION_CREDENTIALS`**: Standard environment variable pointing to a service account key file path (used by `object_store` library)
   - **`GOOGLE_SERVICE_ACCOUNT_KEY`**: Inline JSON content of service account key (for Kubernetes secrets mounted as env vars in worker pods). This is the standard env var used by the `object_store` crate.
 - Added GCS end-to-end test example in `examples/word-frequencies/`
+- Fork support: Added `--image` flag to `falconeri deploy` to specify a custom container image, enabling deployment from forked repositories. This flag is for production deployments only (mutually exclusive with `--development`).
+- Fork support: CI workflow now uses `github.repository_owner` variable, so forks automatically build and push images to their own container registry.
 
 ### Changed
 

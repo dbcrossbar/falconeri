@@ -102,6 +102,22 @@ Finally, update your database to the latest schema:
 falconeri migrate
 ```
 
+## Deploying from a fork
+
+If you maintain a fork of falconeri and want to deploy your own builds:
+
+1. Fork the repository on GitHub.
+2. Push a version tag (e.g., `v2.0.0`). CI will automatically build and push your Docker image to `ghcr.io/YOUR_ORG/falconeri:v2.0.0`.
+3. Deploy with your custom image:
+
+```sh
+falconeri deploy --image ghcr.io/YOUR_ORG/falconeri:v2.0.0
+```
+
+This sets the image used for both the `falconerid` deployment and worker init containers.
+
+Note: The `--image` flag is for production deployments only and cannot be combined with `--development`.
+
 ## Setting up an HTTP ingress
 
 `falconerid` provides a [REST API](./rest-api.md) for programmatic access. Within a Kubernetes cluster, you can access it via `http://falconerid:8089`.

@@ -192,7 +192,7 @@ spec:
     spec:
       containers:
       - name: falconerid
-        image: ghcr.io/dbcrossbar/falconeri:{{config.version}}
+        image: {{config.image}}
 {{#if config.use_local_image}}
         imagePullPolicy: Never
 {{/if}}
@@ -204,6 +204,8 @@ spec:
           value: "{{config.falconerid_log_level}}"
         - name: FALCONERI_USE_LOCAL_IMAGE
           value: "{{config.use_local_image}}"
+        - name: FALCONERI_IMAGE
+          value: "{{config.image}}"
         resources:
           requests:
             cpu: "{{config.falconerid_cpu}}"
