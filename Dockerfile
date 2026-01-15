@@ -2,35 +2,14 @@
 # Alpine 3.21 is current stable LTS (released Nov 2025).
 FROM alpine:3.21
 
-# Install `gsutil`. Taken from
-# https://github.com/GoogleCloudPlatform/cloud-sdk-docker/blob/master/alpine/Dockerfile.
-# Note: gcloud SDK version 508.0.0 is current as of Dec 2025.
-ARG CLOUD_SDK_VERSION=508.0.0
-ENV CLOUD_SDK_VERSION=$CLOUD_SDK_VERSION
-ENV PATH=/google-cloud-sdk/bin:$PATH
+# Install minimal dependencies.
+# - bash: Used by some scripts
+# - ca-certificates: Required for HTTPS connections
 RUN apk --no-cache --update add \
-        curl \
-        python3 \
-        py-crcmod \
         bash \
-        libc6-compat \
-        openssh-client \
-        git \
-        gnupg \
-    && curl -O https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-sdk-${CLOUD_SDK_VERSION}-linux-x86_64.tar.gz && \
-    tar xzf google-cloud-sdk-${CLOUD_SDK_VERSION}-linux-x86_64.tar.gz && \
-    rm google-cloud-sdk-${CLOUD_SDK_VERSION}-linux-x86_64.tar.gz && \
-    ln -s /lib /lib64 && \
-    gcloud config set core/disable_usage_reporting true && \
-    gcloud config set component_manager/disable_update_check true && \
-    gcloud config set metrics/environment github_docker_image && \
-    gcloud --version
-VOLUME ["/root/.config"]
+        ca-certificates
 
-# Install `awscli`.
-RUN apk --no-cache --update add aws-cli
-
-# Install `kubectl`.
+# Install `kubectl` for Kubernetes operations (used by falconerid).
 # kubectl 1.31.x is current stable as of Dec 2025.
 ARG KUBERNETES_VERSION=1.31.14
 ENV KUBERNETES_VERSION=$KUBERNETES_VERSION
@@ -45,4 +24,5 @@ ARG MODE=debug
 ARG MUSL_TARGET=x86_64-unknown-linux-musl
 
 # Copy static executables into container.
+# These are statically linked musl binaries - no shared library dependencies.
 ADD target/${MUSL_TARGET}/${MODE}/falconerid target/${MUSL_TARGET}/${MODE}/falconeri-worker /usr/local/bin/
