@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0-alpha.5] - 2026-01-15
+
 ### Added
 
 - Added GCS (Google Cloud Storage) authentication support with three options:
@@ -20,7 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Replaced `gsutil` and `aws` CLIs with native Rust `object_store` crate for cloud storage operations. This means smaller worker images and better error handling.
-- Removed Google Cloud SDK and `aws-cli` from Docker image, reducing image size by ~500MB. Cloud storage is now handled natively by the Rust binaries.
+
+## Fixed
+
+- Removed Google Cloud SDK and `aws-cli` from `falconeri` Docker image, reducing image size by ~500MB. Cloud storage is now handled natively by the Rust binaries.
 
 ## [2.0.0-alpha.4] - 2026-01-11
 

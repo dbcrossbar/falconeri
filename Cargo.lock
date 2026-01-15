@@ -728,7 +728,7 @@ dependencies = [
 
 [[package]]
 name = "falconeri"
-version = "2.0.0-alpha.4"
+version = "2.0.0-alpha.5"
 dependencies = [
  "clap",
  "falconeri_common",
@@ -740,7 +740,7 @@ dependencies = [
 
 [[package]]
 name = "falconeri-worker"
-version = "2.0.0-alpha.4"
+version = "2.0.0-alpha.5"
 dependencies = [
  "falconeri_common",
  "glob",
@@ -750,7 +750,7 @@ dependencies = [
 
 [[package]]
 name = "falconeri_common"
-version = "2.0.0-alpha.4"
+version = "2.0.0-alpha.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "falconerid"
-version = "2.0.0-alpha.4"
+version = "2.0.0-alpha.5"
 dependencies = [
  "axum",
  "falconeri_common",
