@@ -8,13 +8,13 @@
 //! Using PostgreSQL to store state is one of the simplest ways to build a
 //! medium-reliability, small-scale distributed job system.
 
-use std::{panic::AssertUnwindSafe, process, time::Duration};
+use std::{collections::HashMap, panic::AssertUnwindSafe, process, time::Duration};
 
 use falconeri_common::{
     chrono, db,
     diesel_async::{scoped_futures::ScopedFutureExt, AsyncConnection},
     futures_util::FutureExt,
-    kubernetes::get_all_job_names,
+    kubernetes::{get_all_job_infos, K8sJobInfo},
     prelude::*,
 };
 
@@ -78,16 +78,21 @@ async fn check_running_jobs(pool: &db::AsyncPool) -> Result<()> {
     check_for_datums_which_can_be_rerun(&mut conn).await
 }
 
-/// Check for jobs which should already be marked as finished, or which have
-/// vanished off the cluster.
+/// Check for jobs which should already be marked as finished, which have
+/// vanished off the cluster, or which K8s has marked as failed.
 #[instrument(skip_all, level = "debug")]
 async fn check_for_finished_and_vanished_jobs(
     conn: &mut AsyncPgConnection,
 ) -> Result<()> {
     let jobs = Job::find_by_status(Status::Running, conn).await?;
-    let all_job_names = get_all_job_names().await?;
+    let all_job_infos = get_all_job_infos().await?;
+    let job_info_map: HashMap<&str, &K8sJobInfo> = all_job_infos
+        .iter()
+        .map(|info| (info.name.as_str(), info))
+        .collect();
+
     for mut job in jobs {
-        let all_job_names = &all_job_names;
+        let job_info_map = &job_info_map;
         conn.transaction(|conn| {
             async move {
                 // We may be racing a second copy of the babysitter here, or a
@@ -103,16 +108,28 @@ async fn check_for_finished_and_vanished_jobs(
                 // transaction, but that should be fine.
                 job.update_status_if_done(conn).await?;
 
-                // If the job has been running for a while, but it has no associated
-                // Kubernetes job, assume that either the job has exceeded
-                // `ttlAfterSecondsFinished`, or was manually deleted by someone.
-                let cutoff = Utc::now().naive_utc() - chrono::Duration::minutes(15);
-                if job.status == Status::Running
-                    && job.created_at < cutoff
-                    && !all_job_names.contains(&job.job_name)
-                {
-                    warn!("job {} is running but has no corresponding Kubernetes job, setting status to 'error'", job.job_name);
-                    job.mark_as_error(conn).await?;
+                // If the job is still running, check K8s status.
+                if job.status == Status::Running {
+                    let cutoff = Utc::now().naive_utc() - chrono::Duration::minutes(15);
+
+                    if let Some(k8s_info) = job_info_map.get(job.job_name.as_str()) {
+                        // K8s job exists - check if it has failed
+                        if k8s_info.is_failed {
+                            let reason = k8s_info.failure_reason.as_deref().unwrap_or("unknown");
+                            warn!(
+                                "job {} has been marked as failed by Kubernetes (reason: {}), setting status to 'error'",
+                                job.job_name, reason
+                            );
+                            job.mark_as_error(conn).await?;
+                        }
+                    } else if job.created_at < cutoff {
+                        // K8s job has vanished and job is old enough
+                        warn!(
+                            "job {} is running but has no corresponding Kubernetes job, setting status to 'error'",
+                            job.job_name
+                        );
+                        job.mark_as_error(conn).await?;
+                    }
                 }
                 Ok::<_, Error>(())
             }
