@@ -182,6 +182,35 @@ impl ResourceJson {
     fn is_running(&self) -> bool {
         self.phase() == Some("Running")
     }
+
+    /// Check if this job has failed according to K8s conditions.
+    /// This catches BackoffLimitExceeded and other K8s-level failures.
+    fn is_failed_job(&self) -> bool {
+        if let Some(status) = &self.status {
+            if let Some(conditions) = &status.conditions {
+                for condition in conditions {
+                    if condition.condition_type == "Failed"
+                        && condition.status == "True"
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Get the failure reason if the job has failed.
+    fn failure_reason(&self) -> Option<&str> {
+        let status = self.status.as_ref()?;
+        let conditions = status.conditions.as_ref()?;
+        for condition in conditions {
+            if condition.condition_type == "Failed" && condition.status == "True" {
+                return condition.reason.as_deref();
+            }
+        }
+        None
+    }
 }
 
 /// JSON describing resource metadata.
@@ -191,11 +220,25 @@ struct MetadataJson {
     name: Option<String>,
 }
 
-/// JSON describing resource metadata.
+/// JSON describing resource status.
 #[derive(Deserialize)]
 struct StatusJson {
-    /// Execution phase.
+    /// Execution phase (for pods).
     phase: Option<String>,
+    /// Status conditions (for jobs).
+    conditions: Option<Vec<ConditionJson>>,
+}
+
+/// JSON describing a status condition (used by K8s jobs).
+#[derive(Deserialize)]
+struct ConditionJson {
+    /// The type of condition (e.g., "Complete", "Failed").
+    #[serde(rename = "type")]
+    condition_type: String,
+    /// Whether the condition is "True", "False", or "Unknown".
+    status: String,
+    /// Machine-readable reason for the condition (e.g., "BackoffLimitExceeded").
+    reason: Option<String>,
 }
 
 /// Get a set of currently running pod names.
@@ -232,9 +275,27 @@ pub async fn get_running_pod_names() -> Result<HashSet<String>> {
     Ok(names)
 }
 
+/// Information about a K8s job's status.
+#[derive(Debug, Clone)]
+pub struct K8sJobInfo {
+    /// The job name.
+    pub name: String,
+    /// Whether K8s has marked this job as failed.
+    pub is_failed: bool,
+    /// The failure reason if the job has failed (e.g., "BackoffLimitExceeded").
+    pub failure_reason: Option<String>,
+}
+
 /// Get a set of all job names present on the cluster.
 #[instrument(level = "trace")]
 pub async fn get_all_job_names() -> Result<HashSet<String>> {
+    let job_infos = get_all_job_infos().await?;
+    Ok(job_infos.into_iter().map(|info| info.name).collect())
+}
+
+/// Get information about all jobs on the cluster, including their failure status.
+#[instrument(level = "trace")]
+pub async fn get_all_job_infos() -> Result<Vec<K8sJobInfo>> {
     let jobs = kubectl_parse_json::<ItemsJson<ResourceJson>>(&[
         "get",
         "jobs",
@@ -242,17 +303,25 @@ pub async fn get_all_job_names() -> Result<HashSet<String>> {
     ])
     .await?;
 
-    let mut names = HashSet::new();
+    let mut infos = Vec::new();
     for job in &jobs.items {
         if let Some(name) = job.name() {
-            names.insert(name.to_owned());
+            infos.push(K8sJobInfo {
+                name: name.to_owned(),
+                is_failed: job.is_failed_job(),
+                failure_reason: job.failure_reason().map(|s| s.to_owned()),
+            });
         } else {
             warn!("found nameless job");
         }
     }
-    debug!("found {} jobs", names.len());
-    trace!("jobs: {:?}", names);
-    Ok(names)
+    debug!(
+        "found {} jobs ({} failed)",
+        infos.len(),
+        infos.iter().filter(|i| i.is_failed).count()
+    );
+    trace!("jobs: {:?}", infos);
+    Ok(infos)
 }
 
 /// Deploy a manifest to our Kubernetes cluster.
