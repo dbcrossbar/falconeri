@@ -134,29 +134,26 @@ impl Datum {
     }
 
     /// Find all datums with the specified status that belong to a running job.
-    #[instrument(skip_all, fields(status = %status), level = "trace")]
-    pub async fn active_with_status(
-        status: Status,
-        conn: &mut AsyncPgConnection,
-    ) -> Result<Vec<Datum>> {
+    #[instrument(skip_all, level = "trace")]
+    pub async fn running(conn: &mut AsyncPgConnection) -> Result<Vec<Datum>> {
         let datums = datums::table
-            .inner_join(jobs::table)
-            .filter(jobs::status.eq(Status::Running))
-            .filter(datums::status.eq(status))
+            .filter(datums::status.eq(Status::Running))
             .select(datums::all_columns)
             .load::<Datum>(conn)
             .await
-            .with_context(|| {
-                format!("could not load datums with status {}", status)
-            })?;
+            .context("could not load datums with status=\"running\"")?;
         Ok(datums)
     }
 
     /// Find datums which claim to be running, but whose `pod_name` points to a
-    /// non-existant pod.
+    /// non-existent pod.
+    ///
+    /// Note that we will return any datums whose _job_ has entered a terminal
+    /// status like error, which is necessary to gracefully clean up after
+    /// failed jobs, especially for `retry`.
     #[instrument(skip_all, level = "trace")]
     pub async fn zombies(conn: &mut AsyncPgConnection) -> Result<Vec<Datum>> {
-        let running = Self::active_with_status(Status::Running, conn).await?;
+        let running = Self::running(conn).await?;
         trace!("running datums: {:?}", running);
         let running_pod_names = kubernetes::get_running_pod_names().await?;
         Ok(running

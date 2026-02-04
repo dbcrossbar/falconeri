@@ -79,6 +79,26 @@ pub async fn run_job(
 }
 
 /// The `job retry` subcommand.
+///
+/// This is explicitly a last-ditch, emergency retry for patching up very
+/// expensive failed jobs that _almost_ succeeded. Let's say you've spent a
+/// CPU-year processing 900 datums, and 3 failed because they either needed
+/// slightly more memory, or they contained edge-case data that broke the
+/// Docker image you used to do the processing. So maybe you've edited the
+/// job spec JSON recorded in the database by hand, or you've built and pushed
+/// new images. The `retry` command creates a _new_ job, a "chimera" mixing
+/// successful results from the old job with fresh datums that will be re-run.
+///
+/// We **want** this to work and to be correct. Just because it's a last-ditch
+/// measure doesn't mean we _like_ this code to have issues. But if an operator
+/// is running this, a heightened level of awareness is likely required. Making
+/// chimeras can sometimes go badly.
+///
+/// TODO: _Strengthen_ our guarantees here as much as we can, rather than
+/// letting this rot. Or at least please don't make it worse.
+///
+/// TODO: We likely want to look carefully at _output_ file handling here.
+/// There are some corner cases we may not handle well.
 #[instrument(skip_all, fields(job = %job.id), level = "debug")]
 pub async fn retry_job(job: &Job, conn: &mut AsyncPgConnection) -> Result<Job> {
     // Load the original job, failed datums, and input files.
@@ -93,7 +113,59 @@ pub async fn retry_job(job: &Job, conn: &mut AsyncPgConnection) -> Result<Job> {
     let (pipeline_spec, new_job) = conn
         .transaction(|conn| {
             async move {
+                // First, fetch our datum status counts, to make sure that this
+                // job has actually finished quieting down. We do this carefully,
+                // with a `match`, to make sure we think about every possible status.
+                let datum_status_counts = job.datum_status_counts(conn).await?;
+                debug!("datum status counts: {:?}", datum_status_counts);
+                for datum_status_count in &datum_status_counts {
+                    match datum_status_count.status {
+                        // If we have some datums that have never been run in
+                        // the first place, we need to be super cautions,
+                        // because we haven't thought through whether they might
+                        // get assigned workers on the _old_ job when we're
+                        // trying to make a new one. Earlier versions of retry
+                        // silently ignored these datums, losing any output they
+                        // would have produced. We merely error.
+                        Status::Ready if datum_status_count.count > 0 => {
+                            return Err(format_err!(
+                                "old job has {} never-run datums with status=\"ready\", and we don't know how to retry this safely",
+                                datum_status_count.count,
+                            ));
+                        }
+                        Status::Ready => {}
+
+                        // There are edge cases where some datums may still be marked as
+                        // Running, which the babysitter will try to sort out as part of
+                        // zombie-datum checking.
+                        Status::Running if datum_status_count.count > 0 => {
+                            return Err(format_err!(
+                                "original failed job still has {} running datums; wait to see if the babysitter resolves them in a few minutes",
+                                datum_status_count.count,
+                            ));
+                        }
+                        Status::Running => {}
+
+                        // Huh, never even considered these cases.
+                        Status::Canceled if datum_status_count.count > 0 => {
+                            return Err(format_err!(
+                                "cannot retry job with cancelled datums"
+                            ));
+                        }
+                        Status::Canceled => {}
+
+                        // These are in tidy terminal states, and we'll handle them below.
+                        Status::Done | Status::Error => {}
+                    }
+                }
+
+                // Get our error datums to retry, and the associated files.
                 let error_datums = job.datums_with_status(Status::Error, conn).await?;
+                if error_datums.is_empty() {
+                    return Err(format_err!(
+                        "no error datums to retry (the output data may be complete)",
+                    ));
+                }
                 let input_files = InputFile::for_datums(&error_datums, conn).await?;
 
                 // Recover the original pipeline specification.

@@ -26,7 +26,11 @@ pub enum Opt {
     #[command(name = "list")]
     List,
 
-    /// Retry failed datums.
+    /// Last-ditch retry of large, failed jobs. Create a new job reusing the
+    /// successful outputs of the old job, and re-run just the datums that
+    /// never succeeded the first time. The job and resulting output will be a
+    /// chimera, and they should be treated with caution. HERE THERE BE
+    /// MONSTERS.
     #[command(name = "retry")]
     Retry {
         /// The name of the job for which to retry failed datums.

@@ -1,6 +1,6 @@
 //! Tools for talking to Kubernetes.
 
-use std::{collections::HashSet, env, iter, process::Stdio};
+use std::{collections::HashSet, env, fmt, iter, process::Stdio, time::Duration};
 
 use rand::{distr::Alphanumeric, rng, Rng};
 use serde::de::{Deserialize, DeserializeOwned};
@@ -156,34 +156,6 @@ struct ItemsJson<T> {
     items: Vec<T>,
 }
 
-/// JSON describing a pod or similar resource.
-#[derive(Deserialize)]
-struct ResourceJson {
-    /// Kubernetes resource metadata.
-    metadata: Option<MetadataJson>,
-    /// Kubernetes resource status.
-    status: Option<StatusJson>,
-}
-
-impl ResourceJson {
-    /// Get the name of this resource, if any.
-    fn name(&self) -> Option<&str> {
-        let s = self.metadata.as_ref()?.name.as_ref()?;
-        Some(&s[..])
-    }
-
-    /// Get the `status.phase` field, if any.
-    fn phase(&self) -> Option<&str> {
-        let s = self.status.as_ref()?.phase.as_ref()?;
-        Some(&s[..])
-    }
-
-    /// Is this pod running?
-    fn is_running(&self) -> bool {
-        self.phase() == Some("Running")
-    }
-}
-
 /// JSON describing resource metadata.
 #[derive(Deserialize)]
 struct MetadataJson {
@@ -191,17 +163,90 @@ struct MetadataJson {
     name: Option<String>,
 }
 
-/// JSON describing resource metadata.
+impl MetadataJson {
+    /// Get the resource name, if any.
+    fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+}
+
+/// JSON describing a pod.
 #[derive(Deserialize)]
-struct StatusJson {
-    /// Execution phase.
+struct PodJson {
+    /// Kubernetes resource metadata.
+    metadata: Option<MetadataJson>,
+    /// Kubernetes pod status.
+    status: Option<PodStatusJson>,
+}
+
+impl PodJson {
+    /// Get the name of this pod, if any.
+    fn name(&self) -> Option<&str> {
+        self.metadata.as_ref().and_then(|m| m.name())
+    }
+
+    /// Is this pod running?
+    fn is_running(&self) -> bool {
+        let phase = self.status.as_ref().and_then(|s| s.phase.as_deref());
+        phase == Some("Running")
+    }
+}
+
+/// JSON describing pod status.
+#[derive(Deserialize)]
+struct PodStatusJson {
+    /// Execution phase (e.g., "Pending", "Running").
     phase: Option<String>,
+}
+
+/// JSON describing a job.
+#[derive(Deserialize)]
+struct JobJson {
+    /// Kubernetes job status.
+    status: Option<JobStatusJson>,
+}
+
+impl JobJson {
+    /// Return the failure reported by Kubernetes, if any.
+    fn job_failure(&self) -> Option<K8sJobFailure> {
+        let conditions = self.status.as_ref()?.conditions.as_ref()?;
+        for condition in conditions {
+            if condition.condition_type == "Failed" && condition.status == "True" {
+                return Some(K8sJobFailure {
+                    reason: condition.reason.clone(),
+                    message: condition.message.clone(),
+                });
+            }
+        }
+        None
+    }
+}
+
+/// JSON describing job status.
+#[derive(Deserialize)]
+struct JobStatusJson {
+    /// Status conditions.
+    conditions: Option<Vec<ConditionJson>>,
+}
+
+/// JSON describing a status condition (used by K8s jobs).
+#[derive(Deserialize)]
+struct ConditionJson {
+    /// The type of condition (e.g., "Complete", "Failed").
+    #[serde(rename = "type")]
+    condition_type: String,
+    /// Whether the condition is "True", "False", or "Unknown".
+    status: String,
+    /// Machine-readable reason for the condition (e.g., "BackoffLimitExceeded").
+    reason: Option<String>,
+    /// Human-readable detail about the condition.
+    message: Option<String>,
 }
 
 /// Get a set of currently running pod names.
 #[instrument(level = "trace")]
 pub async fn get_running_pod_names() -> Result<HashSet<String>> {
-    let pods = kubectl_parse_json::<ItemsJson<ResourceJson>>(&[
+    let pods = kubectl_parse_json::<ItemsJson<PodJson>>(&[
         "get",
         "pods",
         // If we pass this, output seems to be limited to 50 records, even if
@@ -232,27 +277,96 @@ pub async fn get_running_pod_names() -> Result<HashSet<String>> {
     Ok(names)
 }
 
-/// Get a set of all job names present on the cluster.
-#[instrument(level = "trace")]
-pub async fn get_all_job_names() -> Result<HashSet<String>> {
-    let jobs = kubectl_parse_json::<ItemsJson<ResourceJson>>(&[
-        "get",
-        "jobs",
-        "--output=json",
-    ])
-    .await?;
+/// Information about a K8s job's status.
+#[derive(Debug, Clone)]
+pub struct K8sJobInfo {
+    /// The job name.
+    pub name: String,
+    /// The terminal failure reported by Kubernetes.
+    pub failure: Option<K8sJobFailure>,
+}
 
-    let mut names = HashSet::new();
-    for job in &jobs.items {
-        if let Some(name) = job.name() {
-            names.insert(name.to_owned());
-        } else {
-            warn!("found nameless job");
+/// A terminal failure reported for a Kubernetes job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct K8sJobFailure {
+    /// The machine-readable reason, such as `BackoffLimitExceeded`.
+    pub reason: Option<String>,
+    /// Human-readable detail supplied by Kubernetes.
+    pub message: Option<String>,
+}
+
+impl fmt::Display for K8sJobFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (&self.reason, &self.message) {
+            (Some(reason), Some(message)) => write!(
+                formatter,
+                "Kubernetes marked the job as failed ({reason}): {message}"
+            ),
+            (Some(reason), None) => {
+                write!(formatter, "Kubernetes marked the job as failed ({reason})")
+            }
+            (None, Some(message)) => {
+                write!(formatter, "Kubernetes marked the job as failed: {message}")
+            }
+            (None, None) => formatter.write_str("Kubernetes marked the job as failed"),
         }
     }
-    debug!("found {} jobs", names.len());
-    trace!("jobs: {:?}", names);
-    Ok(names)
+}
+
+/// Get information about a single job on the cluster, including its
+/// failure status.
+///
+/// The Kubernetes API call is bounded by `timeout`, rounded down to whole
+/// seconds. Callers that hold a database lock while awaiting this function
+/// should pass a short value.
+///
+/// Returns `Ok(None)` if the job does not exist on the cluster. Returns
+/// `Err` if we could not reach the Kubernetes API at all; in that case the
+/// job's existence is not established, and callers must not treat the job
+/// as absent.
+#[instrument(level = "trace")]
+pub async fn get_job_info(
+    name: &str,
+    timeout: Duration,
+) -> Result<Option<K8sJobInfo>> {
+    let request_timeout = format!("--request-timeout={}s", timeout.as_secs());
+    let args: &[&str] = &[
+        "get",
+        "job",
+        name,
+        "--output=json",
+        // Exit successfully with empty output if the job does not exist, so
+        // that "absent" is distinguishable from "could not ask the API".
+        "--ignore-not-found",
+        request_timeout.as_str(),
+    ];
+    // TODO: Consider a tokio timeout on the shell call, just in case
+    // Kubernetes ignores our timeout argument.
+    let output = Command::new("kubectl")
+        .args(args)
+        .output()
+        .await
+        .with_context(|| format!("error starting kubectl with {:?}", args))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format_err!(
+            "error running kubectl with {:?}: {}",
+            args,
+            stderr.trim()
+        ));
+    }
+    if output.stdout.is_empty() {
+        trace!("no kubernetes job named {}", name);
+        return Ok(None);
+    }
+    let job: JobJson = serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("error parsing output of kubectl {:?}", args))?;
+    let info = K8sJobInfo {
+        name: name.to_owned(),
+        failure: job.job_failure(),
+    };
+    trace!("kubernetes job info: {:?}", info);
+    Ok(Some(info))
 }
 
 /// Deploy a manifest to our Kubernetes cluster.
@@ -308,4 +422,82 @@ pub fn use_local_image() -> bool {
     env::var("FALCONERI_USE_LOCAL_IMAGE")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_failed_job_condition() {
+        let job: JobJson = serde_json::from_value(serde_json::json!({
+            "status": {
+                "conditions": [{
+                    "type": "Failed",
+                    "status": "True",
+                    "reason": "BackoffLimitExceeded",
+                    "message": "Job has reached the specified backoff limit"
+                }]
+            }
+        }))
+        .expect("job JSON should parse");
+
+        assert_eq!(
+            job.job_failure(),
+            Some(K8sJobFailure {
+                reason: Some("BackoffLimitExceeded".to_owned()),
+                message: Some(
+                    "Job has reached the specified backoff limit".to_owned()
+                ),
+            })
+        );
+    }
+
+    #[test]
+    fn ignores_false_failed_job_condition() {
+        let job: JobJson = serde_json::from_value(serde_json::json!({
+            "status": {
+                "conditions": [{
+                    "type": "Failed",
+                    "status": "False",
+                    "reason": "BackoffLimitExceeded"
+                }]
+            }
+        }))
+        .expect("job JSON should parse");
+
+        assert_eq!(job.job_failure(), None);
+    }
+
+    #[test]
+    fn handles_job_without_conditions() {
+        let job: JobJson = serde_json::from_value(serde_json::json!({
+            "status": {}
+        }))
+        .expect("job JSON should parse");
+
+        assert_eq!(job.job_failure(), None);
+    }
+
+    #[test]
+    fn handles_failed_job_without_reason() {
+        let job: JobJson = serde_json::from_value(serde_json::json!({
+            "status": {
+                "conditions": [{
+                    "type": "Failed",
+                    "status": "True",
+                    "message": "The job failed"
+                }]
+            }
+        }))
+        .expect("job JSON should parse");
+
+        assert_eq!(
+            job.job_failure(),
+            Some(K8sJobFailure {
+                reason: None,
+                message: Some("The job failed".to_owned()),
+            })
+        );
+    }
 }
