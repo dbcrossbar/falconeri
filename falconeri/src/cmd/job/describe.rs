@@ -24,7 +24,10 @@ pub async fn run(job_name: &str) -> Result<()> {
 fn render_template() {
     use falconeri_common::rest_api::JobDescribeResponse;
 
-    let job = Job::factory();
+    let mut job = Job::factory();
+    job.status = Status::Error;
+    job.error_message =
+        Some("Kubernetes marked the job as failed (BackoffLimitExceeded)".to_owned());
     let dsc = |status: Status, count: u64, rerunable_count: u64| DatumStatusCount {
         status,
         count,
@@ -49,5 +52,9 @@ fn render_template() {
         error_datums,
     };
 
-    render_description(DESCRIBE_TEMPLATE, &params).expect("could not render template");
+    assert!(render_description(DESCRIBE_TEMPLATE, &params)
+        .expect("could not render template")
+        .contains(
+            "Error: Kubernetes marked the job as failed (BackoffLimitExceeded)"
+        ));
 }
