@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0-alpha.6] - 2026-08-03
+
+### Fixed
+
+- falconerid: Detect Kubernetes jobs that fail in place (for example `BackoffLimitExceeded`) instead of only noticing when the Job object disappears. Jobs no longer stay stuck in `running` after Kubernetes has already marked them failed.
+- Persist Kubernetes failure reasons and messages on jobs, and show them in `falconeri job describe`.
+
+### Changed
+
+- CI release workflow now uses current GitHub Actions (`softprops/action-gh-release`, updated checkout/artifact actions) and publishes Docker images to `ghcr.io/<repository_owner>/falconeri`.
+
 ## [2.0.0-alpha.5] - 2026-01-15
 
 ### Added
