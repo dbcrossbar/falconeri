@@ -21,12 +21,13 @@ jobs:
   create_release:
     name: Create release (if needed)
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       release_version: ${{ steps.extract_release_version.outputs.release_version }}
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Extract release version
         id: extract_release_version
         run: |
@@ -46,15 +47,10 @@ jobs:
             jq ".releases[] | select(.version == \"${{ steps.extract_release_version.outputs.release_version }}\") | { title: \"\", description: \"\", releases: [.] }" | \
             clparse - | \
             tail -n +3 > RELEASE_BODY.md
-      - name: "Make release"
-        id: create_release
+      - name: Make release
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.ref }}
-          release_name: "${{ steps.extract_release_version.outputs.release_version }}"
           body_path: RELEASE_BODY.md
 
   # We use a matrix to run our build on every supported platform.
@@ -63,6 +59,9 @@ jobs:
 
     needs:
       - create_release
+
+    permissions:
+      contents: write
 
     strategy:
       matrix:
@@ -77,7 +76,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -108,7 +107,7 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Upload binaries as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binaries-${{ matrix.target }}
           path: |
@@ -125,16 +124,11 @@ jobs:
           zip -j "$release_file" target/${{ matrix.target }}/release/falconeri
           echo "release_file=$release_file" >> "$GITHUB_OUTPUT"
 
-      - name: Upload Release Asset
+      - name: Upload release asset
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v3
         with:
-          upload_url: ${{ needs.create_release.outputs.upload_url }}
-          asset_path: ./${{ steps.build_release.outputs.release_file }}
-          asset_name: ${{ steps.build_release.outputs.release_file }}
-          asset_content_type: application/zip
+          files: ${{ steps.build_release.outputs.release_file }}
 
   # Build and publish Docker image
   docker:
@@ -146,10 +140,10 @@ jobs:
       packages: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: binaries-x86_64-unknown-linux-musl
           path: target/x86_64-unknown-linux-musl/release/
@@ -158,7 +152,7 @@ jobs:
         run: chmod +x target/x86_64-unknown-linux-musl/release/*
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
