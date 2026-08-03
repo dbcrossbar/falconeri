@@ -18,6 +18,8 @@ use falconeri_common::{
     prelude::*,
 };
 
+const MISSING_KUBERNETES_JOB_ERROR: &str = "No corresponding Kubernetes job was found";
+
 /// Spawn a tokio task and run the babysitter in it. This should run indefinitely.
 #[instrument(skip_all, level = "trace")]
 pub fn start_babysitter(pool: db::AsyncPool) -> tokio::task::JoinHandle<()> {
@@ -110,25 +112,24 @@ async fn check_for_finished_and_vanished_jobs(
 
                 // If the job is still running, check K8s status.
                 if job.status == Status::Running {
-                    let cutoff = Utc::now().naive_utc() - chrono::Duration::minutes(15);
+                    let cutoff =
+                        Utc::now().naive_utc() - chrono::Duration::minutes(15);
 
                     if let Some(k8s_info) = job_info_map.get(job.job_name.as_str()) {
-                        // K8s job exists - check if it has failed
-                        if k8s_info.is_failed {
-                            let reason = k8s_info.failure_reason.as_deref().unwrap_or("unknown");
+                        if let Some(failure) = &k8s_info.failure {
                             warn!(
-                                "job {} has been marked as failed by Kubernetes (reason: {}), setting status to 'error'",
-                                job.job_name, reason
+                                "job {} failed: {}; setting status to 'error'",
+                                job.job_name, failure
                             );
-                            job.mark_as_error(conn).await?;
+                            job.mark_as_error(&failure.to_string(), conn).await?;
                         }
                     } else if job.created_at < cutoff {
-                        // K8s job has vanished and job is old enough
                         warn!(
-                            "job {} is running but has no corresponding Kubernetes job, setting status to 'error'",
-                            job.job_name
+                            "job {} failed: {}; setting status to 'error'",
+                            job.job_name, MISSING_KUBERNETES_JOB_ERROR
                         );
-                        job.mark_as_error(conn).await?;
+                        job.mark_as_error(MISSING_KUBERNETES_JOB_ERROR, conn)
+                            .await?;
                     }
                 }
                 Ok::<_, Error>(())

@@ -1,6 +1,6 @@
 //! Tools for talking to Kubernetes.
 
-use std::{collections::HashSet, env, iter, process::Stdio};
+use std::{collections::HashSet, env, fmt, iter, process::Stdio};
 
 use rand::{distr::Alphanumeric, rng, Rng};
 use serde::de::{Deserialize, DeserializeOwned};
@@ -183,30 +183,16 @@ impl ResourceJson {
         self.phase() == Some("Running")
     }
 
-    /// Check if this job has failed according to K8s conditions.
-    /// This catches BackoffLimitExceeded and other K8s-level failures.
-    fn is_failed_job(&self) -> bool {
-        if let Some(status) = &self.status {
-            if let Some(conditions) = &status.conditions {
-                for condition in conditions {
-                    if condition.condition_type == "Failed"
-                        && condition.status == "True"
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-
-    /// Get the failure reason if the job has failed.
-    fn failure_reason(&self) -> Option<&str> {
+    /// Return the failure reported by Kubernetes, if any.
+    fn job_failure(&self) -> Option<K8sJobFailure> {
         let status = self.status.as_ref()?;
         let conditions = status.conditions.as_ref()?;
         for condition in conditions {
             if condition.condition_type == "Failed" && condition.status == "True" {
-                return condition.reason.as_deref();
+                return Some(K8sJobFailure {
+                    reason: condition.reason.clone(),
+                    message: condition.message.clone(),
+                });
             }
         }
         None
@@ -239,6 +225,8 @@ struct ConditionJson {
     status: String,
     /// Machine-readable reason for the condition (e.g., "BackoffLimitExceeded").
     reason: Option<String>,
+    /// Human-readable detail about the condition.
+    message: Option<String>,
 }
 
 /// Get a set of currently running pod names.
@@ -280,10 +268,35 @@ pub async fn get_running_pod_names() -> Result<HashSet<String>> {
 pub struct K8sJobInfo {
     /// The job name.
     pub name: String,
-    /// Whether K8s has marked this job as failed.
-    pub is_failed: bool,
-    /// The failure reason if the job has failed (e.g., "BackoffLimitExceeded").
-    pub failure_reason: Option<String>,
+    /// The terminal failure reported by Kubernetes.
+    pub failure: Option<K8sJobFailure>,
+}
+
+/// A terminal failure reported for a Kubernetes job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct K8sJobFailure {
+    /// The machine-readable reason, such as `BackoffLimitExceeded`.
+    pub reason: Option<String>,
+    /// Human-readable detail supplied by Kubernetes.
+    pub message: Option<String>,
+}
+
+impl fmt::Display for K8sJobFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (&self.reason, &self.message) {
+            (Some(reason), Some(message)) => write!(
+                formatter,
+                "Kubernetes marked the job as failed ({reason}): {message}"
+            ),
+            (Some(reason), None) => {
+                write!(formatter, "Kubernetes marked the job as failed ({reason})")
+            }
+            (None, Some(message)) => {
+                write!(formatter, "Kubernetes marked the job as failed: {message}")
+            }
+            (None, None) => formatter.write_str("Kubernetes marked the job as failed"),
+        }
+    }
 }
 
 /// Get a set of all job names present on the cluster.
@@ -308,8 +321,7 @@ pub async fn get_all_job_infos() -> Result<Vec<K8sJobInfo>> {
         if let Some(name) = job.name() {
             infos.push(K8sJobInfo {
                 name: name.to_owned(),
-                is_failed: job.is_failed_job(),
-                failure_reason: job.failure_reason().map(|s| s.to_owned()),
+                failure: job.job_failure(),
             });
         } else {
             warn!("found nameless job");
@@ -318,7 +330,7 @@ pub async fn get_all_job_infos() -> Result<Vec<K8sJobInfo>> {
     debug!(
         "found {} jobs ({} failed)",
         infos.len(),
-        infos.iter().filter(|i| i.is_failed).count()
+        infos.iter().filter(|info| info.failure.is_some()).count()
     );
     trace!("jobs: {:?}", infos);
     Ok(infos)
@@ -377,4 +389,82 @@ pub fn use_local_image() -> bool {
     env::var("FALCONERI_USE_LOCAL_IMAGE")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_failed_job_condition() {
+        let job: ResourceJson = serde_json::from_value(serde_json::json!({
+            "status": {
+                "conditions": [{
+                    "type": "Failed",
+                    "status": "True",
+                    "reason": "BackoffLimitExceeded",
+                    "message": "Job has reached the specified backoff limit"
+                }]
+            }
+        }))
+        .expect("job JSON should parse");
+
+        assert_eq!(
+            job.job_failure(),
+            Some(K8sJobFailure {
+                reason: Some("BackoffLimitExceeded".to_owned()),
+                message: Some(
+                    "Job has reached the specified backoff limit".to_owned()
+                ),
+            })
+        );
+    }
+
+    #[test]
+    fn ignores_false_failed_job_condition() {
+        let job: ResourceJson = serde_json::from_value(serde_json::json!({
+            "status": {
+                "conditions": [{
+                    "type": "Failed",
+                    "status": "False",
+                    "reason": "BackoffLimitExceeded"
+                }]
+            }
+        }))
+        .expect("job JSON should parse");
+
+        assert_eq!(job.job_failure(), None);
+    }
+
+    #[test]
+    fn handles_job_without_conditions() {
+        let job: ResourceJson = serde_json::from_value(serde_json::json!({
+            "status": {}
+        }))
+        .expect("job JSON should parse");
+
+        assert_eq!(job.job_failure(), None);
+    }
+
+    #[test]
+    fn handles_failed_job_without_reason() {
+        let job: ResourceJson = serde_json::from_value(serde_json::json!({
+            "status": {
+                "conditions": [{
+                    "type": "Failed",
+                    "status": "True",
+                    "message": "The job failed"
+                }]
+            }
+        }))
+        .expect("job JSON should parse");
+
+        assert_eq!(
+            job.job_failure(),
+            Some(K8sJobFailure {
+                reason: None,
+                message: Some("The job failed".to_owned()),
+            })
+        );
+    }
 }

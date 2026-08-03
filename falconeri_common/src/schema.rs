@@ -44,6 +44,7 @@ table! {
         job_name -> Text,
         command -> Array<Text>,
         egress_uri -> Text,
+        error_message -> Nullable<Text>,
     }
 }
 

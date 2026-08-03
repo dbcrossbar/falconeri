@@ -27,6 +27,8 @@ pub struct Job {
     pub command: Vec<String>,
     /// The output bucket or bucket path.
     pub egress_uri: String,
+    /// Why this job ended in an error, when the job itself failed.
+    pub error_message: Option<String>,
 }
 
 impl Job {
@@ -387,13 +389,18 @@ impl Job {
     /// This is not the typical way jobs are marked as having errored, which is
     /// the responsibility of [`Job::update_status_if_done`].
     #[instrument(skip_all, fields(job = %self.id), level = "trace")]
-    pub async fn mark_as_error(&mut self, conn: &mut AsyncPgConnection) -> Result<()> {
+    pub async fn mark_as_error(
+        &mut self,
+        error_message: &str,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<()> {
         debug!("marking job {} as having errored", self.job_name);
         *self = diesel::update(jobs::table)
             .filter(jobs::id.eq(&self.id))
             .set((
                 jobs::updated_at.eq(Utc::now().naive_utc()),
                 jobs::status.eq(Status::Error),
+                jobs::error_message.eq(Some(error_message)),
             ))
             .get_result(conn)
             .await
@@ -413,6 +420,7 @@ impl Job {
             job_name: "my-job-123az".to_owned(), // TODO: Make unique.
             command: vec!["echo".to_owned(), "hi".to_owned()],
             egress_uri: "gs://example-bucket/output/".to_owned(),
+            error_message: None,
         }
     }
 }

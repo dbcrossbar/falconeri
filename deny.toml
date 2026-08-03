@@ -7,6 +7,9 @@ ignore = [
     # utoipa-axum -> paste is unmaintained but there's no safe upgrade yet.
     # https://rustsec.org/advisories/RUSTSEC-2024-0436
     "RUSTSEC-2024-0436",
+    # This affects diesel-async's MySQL backend; we only enable PostgreSQL.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0138
+    "RUSTSEC-2026-0138",
 ]
 
 [licenses]

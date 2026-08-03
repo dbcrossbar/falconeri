@@ -1,6 +1,9 @@
 ID: {{job.id}}
 Job Name: {{job.job_name}}
 Status: {{job.status}}
+{{~ #if job.error_message}}
+Error: {{job.error_message}}
+{{~ /if}}
 Created At: {{job.created_at}}
 Updated At: {{job.updated_at}}
 Egress URI: {{job.egress_uri}}
