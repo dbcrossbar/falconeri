@@ -1,6 +1,6 @@
 use cast;
 use diesel::dsl;
-use diesel_async::{scoped_futures::ScopedFutureExt, AsyncConnection, RunQueryDsl};
+use diesel_async::{AsyncConnection, RunQueryDsl};
 use serde_json;
 use utoipa::ToSchema;
 
@@ -151,42 +151,39 @@ impl Job {
         let job_id = self.id;
         let node_name = node_name.to_owned();
         let pod_name = pod_name.to_owned();
-        conn.transaction(|conn| {
-            async move {
-                let datum_id: Option<Uuid> = datums::table
-                    .select(datums::id)
-                    .for_update()
-                    .skip_locked()
-                    .filter(
-                        datums::job_id
-                            .eq(&job_id)
-                            .and(datums::status.eq(Status::Ready)),
-                    )
-                    .first(conn)
+        conn.transaction(async move |conn| {
+            let datum_id: Option<Uuid> = datums::table
+                .select(datums::id)
+                .for_update()
+                .skip_locked()
+                .filter(
+                    datums::job_id
+                        .eq(&job_id)
+                        .and(datums::status.eq(Status::Ready)),
+                )
+                .first(conn)
+                .await
+                .optional()
+                .context("error trying to reserve next datum")?;
+            if let Some(datum_id) = datum_id {
+                let to_update = datums::table.filter(datums::id.eq(&datum_id));
+                let now = Utc::now().naive_utc();
+                let datum: Datum = diesel::update(to_update)
+                    .set((
+                        datums::updated_at.eq(now),
+                        datums::status.eq(&Status::Running),
+                        datums::node_name.eq(&Some(&node_name)),
+                        datums::pod_name.eq(&Some(&pod_name)),
+                        datums::attempted_run_count
+                            .eq(datums::attempted_run_count + 1),
+                    ))
+                    .get_result(conn)
                     .await
-                    .optional()
-                    .context("error trying to reserve next datum")?;
-                if let Some(datum_id) = datum_id {
-                    let to_update = datums::table.filter(datums::id.eq(&datum_id));
-                    let now = Utc::now().naive_utc();
-                    let datum: Datum = diesel::update(to_update)
-                        .set((
-                            datums::updated_at.eq(now),
-                            datums::status.eq(&Status::Running),
-                            datums::node_name.eq(&Some(&node_name)),
-                            datums::pod_name.eq(&Some(&pod_name)),
-                            datums::attempted_run_count
-                                .eq(datums::attempted_run_count + 1),
-                        ))
-                        .get_result(conn)
-                        .await
-                        .context("cannot mark datum as 'processing'")?;
-                    Ok(Some(datum))
-                } else {
-                    Ok(None)
-                }
+                    .context("cannot mark datum as 'processing'")?;
+                Ok(Some(datum))
+            } else {
+                Ok(None)
             }
-            .scope_boxed()
         })
         .await
     }
@@ -296,85 +293,85 @@ impl Job {
         trace!("querying for status of datums for job {}", self.id);
         let job_id = self.id;
         let updated_job: Option<Job> = conn
-            .transaction(|conn| {
-                async move {
-                    // Lock this job for update. This isn't necessary for this routine
-                    // by itself, but it should help avoid race conditions with job
-                    // retries and the babysitter.
-                    let mut job = Job::find_and_lock_for_update(job_id, conn).await?;
+            .transaction(async move |conn| {
+                // Lock this job for update. This isn't necessary for this routine
+                // by itself, but it should help avoid race conditions with job
+                // retries and the babysitter.
+                let mut job = Job::find_and_lock_for_update(job_id, conn).await?;
 
-                    if job.status != Status::Running {
-                        // Nothing to do, so return immediately.
-                        return Ok::<_, Error>(None);
-                    }
+                if job.status != Status::Running {
+                    // Nothing to do, so return immediately.
+                    return Ok::<_, Error>(None);
+                }
 
-                    // Count the datums with various statuses and divide them into
-                    // groups.
-                    let status_counts =
-                        Job::datum_status_counts_for_job_id(job_id, conn).await?;
+                // Count the datums with various statuses and divide them into
+                // groups.
+                let status_counts =
+                    Job::datum_status_counts_for_job_id(job_id, conn).await?;
 
-                    let mut unfinished = 0;
-                    let mut successful = 0;
-                    let mut failed = 0;
-                    let mut rerunable = 0;
-                    for status_count in status_counts {
-                        match status_count.status {
-                            Status::Ready | Status::Running => {
-                                assert_eq!(status_count.rerunable_count, 0);
-                                unfinished += status_count.count;
-                            }
-                            Status::Done => {
-                                assert_eq!(status_count.rerunable_count, 0);
-                                successful += status_count.count;
-                            }
-                            Status::Error => {
-                                assert!(status_count.rerunable_count <= status_count.count);
-                                failed += status_count.count - status_count.rerunable_count;
-                                rerunable += status_count.rerunable_count;
-                            }
+                let mut unfinished = 0;
+                let mut successful = 0;
+                let mut failed = 0;
+                let mut rerunable = 0;
+                for status_count in status_counts {
+                    match status_count.status {
+                        Status::Ready | Status::Running => {
+                            assert_eq!(status_count.rerunable_count, 0);
+                            unfinished += status_count.count;
+                        }
+                        Status::Done => {
+                            assert_eq!(status_count.rerunable_count, 0);
+                            successful += status_count.count;
+                        }
+                        Status::Error => {
+                            assert!(
+                                status_count.rerunable_count <= status_count.count
+                            );
+                            failed +=
+                                status_count.count - status_count.rerunable_count;
+                            rerunable += status_count.rerunable_count;
+                        }
 
-                            // TODO: Be smarted about `Canceled` once we implement it.
-                            Status::Canceled => {
-                                assert_eq!(status_count.rerunable_count, 0);
-                                failed += status_count.count;
-                            }
+                        // TODO: Be smarted about `Canceled` once we implement it.
+                        Status::Canceled => {
+                            assert_eq!(status_count.rerunable_count, 0);
+                            failed += status_count.count;
                         }
                     }
-
-                    // Decide what to do, if anything.
-                    let job_status = if unfinished > 0 || rerunable > 0 {
-                        trace!(
-                            "{} datums remaining, {} rerunable, not updating job status",
-                            unfinished,
-                            rerunable
-                        );
-                        None
-                    } else if failed > 0 {
-                        debug!("{} datums had errors, marking job as error", failed);
-                        Some(Status::Error)
-                    } else {
-                        debug!(
-                            "all {} datums finished successfully, marking job as done",
-                            successful,
-                        );
-                        Some(Status::Done)
-                    };
-                    if let Some(job_status) = job_status {
-                        job = diesel::update(jobs::table)
-                            .filter(jobs::id.eq(&job_id))
-                            .set((
-                                jobs::updated_at.eq(Utc::now().naive_utc()),
-                                jobs::status.eq(&job_status),
-                            ))
-                            .get_result(conn)
-                            .await
-                            .context("could not update job status")?;
-                        Ok(Some(job))
-                    } else {
-                        Ok(Some(job))
-                    }
                 }
-                .scope_boxed()
+
+                // Decide what to do, if anything.
+                let job_status = if unfinished > 0 || rerunable > 0 {
+                    trace!(
+                        "{} datums remaining, {} rerunable, not updating job status",
+                        unfinished,
+                        rerunable
+                    );
+                    None
+                } else if failed > 0 {
+                    debug!("{} datums had errors, marking job as error", failed);
+                    Some(Status::Error)
+                } else {
+                    debug!(
+                        "all {} datums finished successfully, marking job as done",
+                        successful,
+                    );
+                    Some(Status::Done)
+                };
+                if let Some(job_status) = job_status {
+                    job = diesel::update(jobs::table)
+                        .filter(jobs::id.eq(&job_id))
+                        .set((
+                            jobs::updated_at.eq(Utc::now().naive_utc()),
+                            jobs::status.eq(&job_status),
+                        ))
+                        .get_result(conn)
+                        .await
+                        .context("could not update job status")?;
+                    Ok(Some(job))
+                } else {
+                    Ok(Some(job))
+                }
             })
             .await?;
 

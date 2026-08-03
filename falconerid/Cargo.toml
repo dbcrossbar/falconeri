@@ -13,7 +13,7 @@ serde.workspace = true
 serde_yaml = "0.9"
 tokio = { workspace = true, features = ["full"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "limit"] }
+tower-http = { version = "0.7", features = ["trace", "limit"] }
 tracing.workspace = true
 utoipa = "5.4.0"
 utoipa-axum = "0.2.0"

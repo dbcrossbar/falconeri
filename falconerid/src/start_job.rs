@@ -4,7 +4,7 @@ use std::cmp::min;
 
 use falconeri_common::{
     cast,
-    diesel_async::{scoped_futures::ScopedFutureExt, AsyncConnection},
+    diesel_async::AsyncConnection,
     kubernetes,
     manifest::render_manifest,
     pipeline::*,
@@ -64,14 +64,11 @@ pub async fn run_job(
 
     // Insert everthing into the database.
     let job = conn
-        .transaction(|conn| {
-            async move {
-                let job = new_job.insert(conn).await?;
-                NewDatum::insert_all(&new_datums, conn).await?;
-                NewInputFile::insert_all(&new_input_files, conn).await?;
-                Ok::<_, Error>(job)
-            }
-            .scope_boxed()
+        .transaction(async move |conn| {
+            let job = new_job.insert(conn).await?;
+            NewDatum::insert_all(&new_datums, conn).await?;
+            NewInputFile::insert_all(&new_input_files, conn).await?;
+            Ok::<_, Error>(job)
         })
         .await?;
 
@@ -93,62 +90,56 @@ pub async fn retry_job(job: &Job, conn: &mut AsyncPgConnection) -> Result<Job> {
     let job_egress_uri = job.egress_uri.clone();
 
     let (pipeline_spec, new_job) = conn
-        .transaction(|conn| {
-            async move {
-                let error_datums = job.datums_with_status(Status::Error, conn).await?;
-                let input_files = InputFile::for_datums(&error_datums, conn).await?;
+        .transaction(async move |conn| {
+            let error_datums = job.datums_with_status(Status::Error, conn).await?;
+            let input_files = InputFile::for_datums(&error_datums, conn).await?;
 
-                // Recover the original pipeline specification.
-                let mut pipeline_spec: PipelineSpec =
-                    serde_json::from_value(job_pipeline_spec.clone())
-                        .context("could not parse original pipeline spec")?;
-                pipeline_spec.parallelism_spec.constant = min(
-                    pipeline_spec.parallelism_spec.constant,
-                    cast::u32(error_datums.len())?,
-                );
+            // Recover the original pipeline specification.
+            let mut pipeline_spec: PipelineSpec =
+                serde_json::from_value(job_pipeline_spec.clone())
+                    .context("could not parse original pipeline spec")?;
+            pipeline_spec.parallelism_spec.constant = min(
+                pipeline_spec.parallelism_spec.constant,
+                cast::u32(error_datums.len())?,
+            );
 
-                // Create a new job record.
-                let job_name =
-                    unique_kubernetes_job_name(&pipeline_spec.pipeline.name);
-                let new_job = NewJob {
-                    id: Uuid::new_v4(),
-                    pipeline_spec: job_pipeline_spec.clone(),
-                    job_name,
-                    command: job_command.clone(),
-                    egress_uri: job_egress_uri.clone(),
-                }
-                .insert(conn)
-                .await?;
-
-                // Create new datums and input files.
-                let mut new_datums = vec![];
-                let mut new_input_files = vec![];
-                for (old_datum, input_files) in
-                    error_datums.into_iter().zip(input_files)
-                {
-                    let datum_id = Uuid::new_v4();
-                    new_datums.push(NewDatum {
-                        id: datum_id,
-                        job_id: new_job.id,
-                        // I guess we'll give this the same number of retries it was
-                        // allowed before?
-                        maximum_allowed_run_count: old_datum.maximum_allowed_run_count,
-                    });
-                    for input_file in input_files {
-                        new_input_files.push(NewInputFile {
-                            datum_id,
-                            uri: input_file.uri.clone(),
-                            local_path: input_file.local_path.clone(),
-                            job_id: new_job.id,
-                        });
-                    }
-                }
-                NewDatum::insert_all(&new_datums, conn).await?;
-                NewInputFile::insert_all(&new_input_files, conn).await?;
-
-                Ok::<_, Error>((pipeline_spec, new_job))
+            // Create a new job record.
+            let job_name = unique_kubernetes_job_name(&pipeline_spec.pipeline.name);
+            let new_job = NewJob {
+                id: Uuid::new_v4(),
+                pipeline_spec: job_pipeline_spec.clone(),
+                job_name,
+                command: job_command.clone(),
+                egress_uri: job_egress_uri.clone(),
             }
-            .scope_boxed()
+            .insert(conn)
+            .await?;
+
+            // Create new datums and input files.
+            let mut new_datums = vec![];
+            let mut new_input_files = vec![];
+            for (old_datum, input_files) in error_datums.into_iter().zip(input_files) {
+                let datum_id = Uuid::new_v4();
+                new_datums.push(NewDatum {
+                    id: datum_id,
+                    job_id: new_job.id,
+                    // I guess we'll give this the same number of retries it was
+                    // allowed before?
+                    maximum_allowed_run_count: old_datum.maximum_allowed_run_count,
+                });
+                for input_file in input_files {
+                    new_input_files.push(NewInputFile {
+                        datum_id,
+                        uri: input_file.uri.clone(),
+                        local_path: input_file.local_path.clone(),
+                        job_id: new_job.id,
+                    });
+                }
+            }
+            NewDatum::insert_all(&new_datums, conn).await?;
+            NewInputFile::insert_all(&new_input_files, conn).await?;
+
+            Ok::<_, Error>((pipeline_spec, new_job))
         })
         .await?;
 

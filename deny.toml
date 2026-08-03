@@ -7,9 +7,6 @@ ignore = [
     # utoipa-axum -> paste is unmaintained but there's no safe upgrade yet.
     # https://rustsec.org/advisories/RUSTSEC-2024-0436
     "RUSTSEC-2024-0436",
-    # This affects diesel-async's MySQL backend; we only enable PostgreSQL.
-    # https://rustsec.org/advisories/RUSTSEC-2026-0138
-    "RUSTSEC-2026-0138",
 ]
 
 [licenses]
@@ -70,8 +67,5 @@ skip-tree = [
     { name = "wasi" },
     # ring and prettytable-rs pull in older getrandom via redox_users
     { name = "getrandom", version = "0.2" },
-    # jni uses windows-sys 0.45; other deps use 0.61; affects Windows only
-    { name = "windows-sys", version = "0.45" },
-    { name = "windows-sys", version = "0.60" },
 ]
 

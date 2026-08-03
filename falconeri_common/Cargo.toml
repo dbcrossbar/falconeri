@@ -9,11 +9,11 @@ license.workspace = true
 anyhow = { version = "1.0.45", features = ["backtrace"] }
 async-trait = "0.1"
 backon = "1"
-base64 = "0.22"
+base64 = "0.23"
 cast = { version = "0.3.0", features = ["std"] }
 chrono = { version = "0.4.4", features = ["serde"] }
 diesel = { version = "2.3", features = ["chrono", "postgres_backend", "serde_json", "uuid"] }
-diesel-async = { version = "0.7", features = ["postgres", "deadpool", "migrations"] }
+diesel-async = { version = "0.9", features = ["postgres", "deadpool", "migrations"] }
 diesel_migrations = "2.3"
 futures.workspace = true
 futures-util = "0.3"
@@ -21,7 +21,7 @@ handlebars = "6"
 humantime-serde = "1.0.1"
 lazy_static = "1.0.2"
 object_store.workspace = true
-rand = "0.9"
+rand = "0.10"
 regex = "1.0.2"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 semver = "1.0.4"

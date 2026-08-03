@@ -11,7 +11,7 @@ use axum::{
 use falconeri_common::{
     db,
     diesel::BelongingToDsl,
-    diesel_async::{scoped_futures::ScopedFutureExt, AsyncConnection, RunQueryDsl},
+    diesel_async::{AsyncConnection, RunQueryDsl},
     falconeri_common_version,
     models::DatumStateError,
     pipeline::PipelineSpec,
@@ -296,58 +296,55 @@ async fn patch_datum(
 
     // Wrap everything in a transaction for the ownership lock.
     let datum = conn
-        .transaction(|conn| {
-            async move {
-                // Lock datum and verify ownership and status (returns 403 if mismatch).
-                let mut datum = Datum::lock_and_verify_owner(
-                    datum_id,
-                    &request.pod_name,
-                    Status::Running,
-                    conn,
-                )
-                .await
-                .map_err(FalconeridError::from)?;
+        .transaction(async move |conn| {
+            // Lock datum and verify ownership and status (returns 403 if mismatch).
+            let mut datum = Datum::lock_and_verify_owner(
+                datum_id,
+                &request.pod_name,
+                Status::Running,
+                conn,
+            )
+            .await
+            .map_err(FalconeridError::from)?;
 
-                // We only support a few very specific types of patches.
-                match &patch {
-                    // Set status to `Status::Done`.
-                    DatumPatch {
-                        status: Status::Done,
-                        output,
-                        error_message: None,
-                        backtrace: None,
-                    } => {
-                        datum.mark_as_done(output, conn).await?;
-                    }
-
-                    // Set status to `Status::Error`.
-                    DatumPatch {
-                        status: Status::Error,
-                        output,
-                        error_message: Some(error_message),
-                        backtrace: Some(backtrace),
-                    } => {
-                        datum
-                            .mark_as_error(output, error_message, backtrace, conn)
-                            .await?;
-                    }
-
-                    // All other combinations are forbidden.
-                    other => {
-                        return Err(FalconeridError::Internal(format_err!(
-                            "cannot update datum with {:?}",
-                            other
-                        )));
-                    }
+            // We only support a few very specific types of patches.
+            match &patch {
+                // Set status to `Status::Done`.
+                DatumPatch {
+                    status: Status::Done,
+                    output,
+                    error_message: None,
+                    backtrace: None,
+                } => {
+                    datum.mark_as_done(output, conn).await?;
                 }
 
-                // If there are no more datums, mark the job as finished (either
-                // done or error).
-                datum.update_job_status_if_done(conn).await?;
+                // Set status to `Status::Error`.
+                DatumPatch {
+                    status: Status::Error,
+                    output,
+                    error_message: Some(error_message),
+                    backtrace: Some(backtrace),
+                } => {
+                    datum
+                        .mark_as_error(output, error_message, backtrace, conn)
+                        .await?;
+                }
 
-                Ok::<_, FalconeridError>(datum)
+                // All other combinations are forbidden.
+                other => {
+                    return Err(FalconeridError::Internal(format_err!(
+                        "cannot update datum with {:?}",
+                        other
+                    )));
+                }
             }
-            .scope_boxed()
+
+            // If there are no more datums, mark the job as finished (either
+            // done or error).
+            datum.update_job_status_if_done(conn).await?;
+
+            Ok::<_, FalconeridError>(datum)
         })
         .await?;
 
@@ -388,8 +385,7 @@ async fn create_output_files(
     Json(request): Json<CreateOutputFilesRequest>,
 ) -> FalconeridResult<Json<OutputFilesResponse>> {
     let output_files = conn
-        .transaction(|conn| {
-            async move {
+        .transaction(async move |conn| {
                 // Lock datum and verify ownership and status (returns 403 if mismatch).
                 let datum =
                     Datum::lock_and_verify_owner(datum_id, &request.pod_name, Status::Running, conn)
@@ -453,8 +449,6 @@ async fn create_output_files(
 
                 let output_files = NewOutputFile::insert_all(&new_files, conn).await?;
                 Ok::<_, FalconeridError>(output_files)
-            }
-            .scope_boxed()
         })
         .await?;
     debug!(count = output_files.len(), "created output files");
@@ -490,23 +484,20 @@ async fn patch_output_files(
     let error_count = error_ids.len();
 
     // Apply our updates within a transaction that verifies ownership.
-    conn.transaction(|conn| {
-        async move {
-            // Lock datum and verify ownership and status (returns 403 if mismatch).
-            let _datum = Datum::lock_and_verify_owner(
-                datum_id,
-                &request.pod_name,
-                Status::Running,
-                conn,
-            )
-            .await
-            .map_err(FalconeridError::from)?;
+    conn.transaction(async move |conn| {
+        // Lock datum and verify ownership and status (returns 403 if mismatch).
+        let _datum = Datum::lock_and_verify_owner(
+            datum_id,
+            &request.pod_name,
+            Status::Running,
+            conn,
+        )
+        .await
+        .map_err(FalconeridError::from)?;
 
-            OutputFile::mark_ids_as_done(&done_ids, conn).await?;
-            OutputFile::mark_ids_as_error(&error_ids, conn).await?;
-            Ok::<_, FalconeridError>(())
-        }
-        .scope_boxed()
+        OutputFile::mark_ids_as_done(&done_ids, conn).await?;
+        OutputFile::mark_ids_as_error(&error_ids, conn).await?;
+        Ok::<_, FalconeridError>(())
     })
     .await?;
 

@@ -12,7 +12,7 @@ use std::{collections::HashMap, panic::AssertUnwindSafe, process, time::Duration
 
 use falconeri_common::{
     chrono, db,
-    diesel_async::{scoped_futures::ScopedFutureExt, AsyncConnection},
+    diesel_async::AsyncConnection,
     futures_util::FutureExt,
     kubernetes::{get_all_job_infos, K8sJobInfo},
     prelude::*,
@@ -95,46 +95,42 @@ async fn check_for_finished_and_vanished_jobs(
 
     for mut job in jobs {
         let job_info_map = &job_info_map;
-        conn.transaction(|conn| {
-            async move {
-                // We may be racing a second copy of the babysitter here, or a
-                // request from a worker, so start a transaction, take a lock, and
-                // double-check everything before we act on it.
-                job.lock_for_update(conn).await?;
+        conn.transaction(async move |conn| {
+            // We may be racing a second copy of the babysitter here, or a
+            // request from a worker, so start a transaction, take a lock, and
+            // double-check everything before we act on it.
+            job.lock_for_update(conn).await?;
 
-                // Check to see if we should have already marked this job as
-                // finished. This should normally happen automatically, but if it
-                // doesn't, we'll catch it here.
-                //
-                // This will internally retake the lock and open a nested a
-                // transaction, but that should be fine.
-                job.update_status_if_done(conn).await?;
+            // Check to see if we should have already marked this job as
+            // finished. This should normally happen automatically, but if it
+            // doesn't, we'll catch it here.
+            //
+            // This will internally retake the lock and open a nested a
+            // transaction, but that should be fine.
+            job.update_status_if_done(conn).await?;
 
-                // If the job is still running, check K8s status.
-                if job.status == Status::Running {
-                    let cutoff =
-                        Utc::now().naive_utc() - chrono::Duration::minutes(15);
+            // If the job is still running, check K8s status.
+            if job.status == Status::Running {
+                let cutoff = Utc::now().naive_utc() - chrono::Duration::minutes(15);
 
-                    if let Some(k8s_info) = job_info_map.get(job.job_name.as_str()) {
-                        if let Some(failure) = &k8s_info.failure {
-                            warn!(
-                                "job {} failed: {}; setting status to 'error'",
-                                job.job_name, failure
-                            );
-                            job.mark_as_error(&failure.to_string(), conn).await?;
-                        }
-                    } else if job.created_at < cutoff {
+                if let Some(k8s_info) = job_info_map.get(job.job_name.as_str()) {
+                    if let Some(failure) = &k8s_info.failure {
                         warn!(
                             "job {} failed: {}; setting status to 'error'",
-                            job.job_name, MISSING_KUBERNETES_JOB_ERROR
+                            job.job_name, failure
                         );
-                        job.mark_as_error(MISSING_KUBERNETES_JOB_ERROR, conn)
-                            .await?;
+                        job.mark_as_error(&failure.to_string(), conn).await?;
                     }
+                } else if job.created_at < cutoff {
+                    warn!(
+                        "job {} failed: {}; setting status to 'error'",
+                        job.job_name, MISSING_KUBERNETES_JOB_ERROR
+                    );
+                    job.mark_as_error(MISSING_KUBERNETES_JOB_ERROR, conn)
+                        .await?;
                 }
-                Ok::<_, Error>(())
             }
-            .scope_boxed()
+            Ok::<_, Error>(())
         })
         .await?;
     }
@@ -151,8 +147,7 @@ async fn check_for_zombie_datums(conn: &mut AsyncPgConnection) -> Result<()> {
         // We may be racing a second copy of the babysitter here, so start a
         // transaction, take a lock, and double-check that our status is still
         // `Status::Running`.
-        conn.transaction(|conn| {
-            async move {
+        conn.transaction(async move |conn| {
                 zombie.lock_for_update(conn).await?;
                 if zombie.status == Status::Running {
                     warn!(
@@ -171,8 +166,6 @@ async fn check_for_zombie_datums(conn: &mut AsyncPgConnection) -> Result<()> {
                     warn!("someone beat us to zombie datum {}", zombie.id);
                 }
                 Ok::<_, Error>(())
-            }
-            .scope_boxed()
         })
         .await?;
         // If there are no more datums, mark the job as finished (either
@@ -196,43 +189,40 @@ async fn check_for_datums_which_can_be_rerun(
         // We may be racing a second copy of the babysitter here, so start a
         // transaction, take a lock, and double-check that we're still eligible
         // for a re-run.
-        conn.transaction(|conn| {
-            async move {
-                // Mark our datum as re-runnable.
-                datum.lock_for_update(conn).await?;
-                if datum.is_rerunable() {
-                    warn!(
-                        "rescheduling errored datum {} (previously on try {}/{})",
-                        datum.id,
-                        datum.attempted_run_count,
-                        datum.maximum_allowed_run_count
-                    );
-                    datum.mark_as_eligible_for_rerun(conn).await?;
-                } else {
-                    warn!("someone beat us to rerunable datum {}", datum.id);
-                }
-
-                // Remove `OutputFile` records for this datum, so we can upload the
-                // same output files again.
-                //
-                // TODO: Unfortunately, there's an issue here. It takes one of two
-                // forms:
-                //
-                // 1. Workers use deterministic file names. In this case, we
-                //    _should_ be fine, because we'll just overwrite any files we
-                //    did manage to upload.
-                // 2. Workers use random filenames. Here, there are two subcases: a.
-                //    We have successfully created an `OutputFile` record. b. We
-                //    have yet to create an `OutputFile` record.
-                //
-                // We need to fix (2b) by pre-creating all our `OutputFile` records
-                // _before_ uploading, and then updating them later to show that the
-                // output succeeded. Which them into case (2a). And then we can fix (2a)
-                // by deleting any S3/GCS files corresponding to `OutputFile::uri`.
-                OutputFile::delete_for_datum(&datum, conn).await?;
-                Ok::<_, Error>(())
+        conn.transaction(async move |conn| {
+            // Mark our datum as re-runnable.
+            datum.lock_for_update(conn).await?;
+            if datum.is_rerunable() {
+                warn!(
+                    "rescheduling errored datum {} (previously on try {}/{})",
+                    datum.id,
+                    datum.attempted_run_count,
+                    datum.maximum_allowed_run_count
+                );
+                datum.mark_as_eligible_for_rerun(conn).await?;
+            } else {
+                warn!("someone beat us to rerunable datum {}", datum.id);
             }
-            .scope_boxed()
+
+            // Remove `OutputFile` records for this datum, so we can upload the
+            // same output files again.
+            //
+            // TODO: Unfortunately, there's an issue here. It takes one of two
+            // forms:
+            //
+            // 1. Workers use deterministic file names. In this case, we
+            //    _should_ be fine, because we'll just overwrite any files we
+            //    did manage to upload.
+            // 2. Workers use random filenames. Here, there are two subcases: a.
+            //    We have successfully created an `OutputFile` record. b. We
+            //    have yet to create an `OutputFile` record.
+            //
+            // We need to fix (2b) by pre-creating all our `OutputFile` records
+            // _before_ uploading, and then updating them later to show that the
+            // output succeeded. Which them into case (2a). And then we can fix (2a)
+            // by deleting any S3/GCS files corresponding to `OutputFile::uri`.
+            OutputFile::delete_for_datum(&datum, conn).await?;
+            Ok::<_, Error>(())
         })
         .await?;
     }
