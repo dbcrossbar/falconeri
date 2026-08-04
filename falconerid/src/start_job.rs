@@ -232,6 +232,20 @@ mod tests {
                 .expect("activeDeadlineSeconds should be an integer")
         }
 
+        fn copy_worker_memory_request(&self) -> &str {
+            self.0["spec"]["template"]["spec"]["initContainers"][0]["resources"]
+                ["requests"]["memory"]
+                .as_str()
+                .expect("copy-worker memory request should be a string")
+        }
+
+        fn copy_worker_memory_limit(&self) -> &str {
+            self.0["spec"]["template"]["spec"]["initContainers"][0]["resources"]
+                ["limits"]["memory"]
+                .as_str()
+                .expect("copy-worker memory limit should be a string")
+        }
+
         fn pod_failure_policy_rules(&self) -> &[serde_json::Value] {
             self.0["spec"]["podFailurePolicy"]["rules"]
                 .as_array()
@@ -254,6 +268,15 @@ mod tests {
     #[test]
     fn renders_valid_job_manifest() {
         RenderedJobManifest::for_pipeline_spec(&example_pipeline_spec());
+    }
+
+    #[test]
+    fn copy_worker_has_memory_to_copy_the_injected_binary() {
+        let rendered_job_manifest =
+            RenderedJobManifest::for_pipeline_spec(&example_pipeline_spec());
+
+        assert_eq!(rendered_job_manifest.copy_worker_memory_request(), "64Mi");
+        assert_eq!(rendered_job_manifest.copy_worker_memory_limit(), "64Mi");
     }
 
     #[test]

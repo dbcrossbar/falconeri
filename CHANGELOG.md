@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0-alpha.8] - 2026-08-04
+
+### Fixed
+
+- Raise the worker injection init container's memory from 16 MiB to 64 MiB. The worker binary nearly filled the old limit, so copying it into the shared volume intermittently OOM-killed job pods and consumed their failed-pod budget.
+
 ## [2.0.0-alpha.7] - 2026-08-04
 
 ### Added
