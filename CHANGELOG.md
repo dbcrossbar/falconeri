@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0-alpha.7] - 2026-08-04
+
+### Added
+
+- Pipeline specs accept `worker_failure_policy.maximum_counted_pod_failures`, which sets how many failed worker pods Kubernetes counts before failing the whole job.
+
+### Changed
+
+- Worker jobs no longer count pods lost to preemption, eviction or node drains against their failed-pod budget. This requires Kubernetes 1.26 or later.
+- The default failed-pod budget is now the greater of four pods or twice `parallelism_spec.constant`, rather than a flat four. Large jobs used to die on a handful of unrelated pod failures that Falconeri would have retried.
+- `job_timeout` now defaults to three days instead of being unlimited, so no job can run forever. A zero `job_timeout` is now rejected.
+
+### Fixed
+
+- `falconeri job retry` now recovers `datum_tries` and `job_timeout` from the original job. `falconerid` was storing a hand-built copy of the pipeline spec that omitted the first and wrote the second in a format it could not read back.
+
 ## [2.0.0-alpha.6] - 2026-08-03
 
 ### Fixed

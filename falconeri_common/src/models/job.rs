@@ -19,7 +19,8 @@ pub struct Job {
     pub updated_at: NaiveDateTime,
     /// The current status of this job.
     pub status: Status,
-    /// A copy of our original pipeline spec (just for debugging).
+    /// The pipeline spec this job was run with. `job retry` reparses this, so it
+    /// must be a complete, valid `PipelineSpec`.
     pub pipeline_spec: serde_json::Value,
     /// The Kubenetes `Job` name for this job.
     pub job_name: String,
@@ -440,7 +441,8 @@ pub struct DatumStatusCount {
 pub struct NewJob {
     /// The unique ID for this job.
     pub id: Uuid,
-    /// A copy of our original pipeline spec (just for debugging).
+    /// The pipeline spec this job was run with. `job retry` reparses this, so it
+    /// must be a complete, valid `PipelineSpec`.
     pub pipeline_spec: serde_json::Value,
     /// The Kubenetes `Job` name for this job.
     pub job_name: String,

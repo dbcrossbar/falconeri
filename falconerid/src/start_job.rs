@@ -3,13 +3,8 @@
 use std::cmp::min;
 
 use falconeri_common::{
-    cast,
-    diesel_async::AsyncConnection,
-    kubernetes,
-    manifest::render_manifest,
-    pipeline::*,
-    prelude::*,
-    serde_json::{self, json},
+    cast, diesel_async::AsyncConnection, kubernetes, manifest::render_manifest,
+    pipeline::*, prelude::*, serde_json,
 };
 
 use crate::inputs::input_to_datums;
@@ -33,18 +28,15 @@ pub async fn run_job(
         );
     }
 
+    // Store the spec as we are actually going to run it, including the defaults
+    // we filled in above, because `retry_job` reparses it to rerun this job.
+    let mut pipeline_spec_as_run = pipeline_spec.clone();
+    pipeline_spec_as_run.transform = transform;
+
     let new_job = NewJob {
         id: job_id,
-        pipeline_spec: json!({
-            "pipeline": pipeline_spec.pipeline,
-            "transform": transform,
-            "parallelism_spec": pipeline_spec.parallelism_spec,
-            "resource_requests": pipeline_spec.resource_requests,
-            "job_timeout": pipeline_spec.job_timeout.map(|timeout| timeout.as_secs()),
-            "node_selector": pipeline_spec.node_selector,
-            "input": pipeline_spec.input,
-            "egress": pipeline_spec.egress,
-        }),
+        pipeline_spec: serde_json::to_value(&pipeline_spec_as_run)
+            .context("could not serialize pipeline spec")?,
         job_name,
         command: pipeline_spec.transform.cmd.clone(),
         egress_uri: pipeline_spec.egress.uri.clone(),
@@ -165,7 +157,10 @@ const RUN_MANIFEST_TEMPLATE: &str = include_str!("job_manifest.yml.hbs");
 #[derive(Serialize)]
 struct JobParams<'a> {
     pipeline_spec: &'a PipelineSpec,
-    job_timeout: Option<u64>,
+    /// The Kubernetes Job `backoffLimit`.
+    kubernetes_backoff_limit: u32,
+    /// The Kubernetes Job `activeDeadlineSeconds`.
+    job_timeout_seconds: u64,
     job: &'a Job,
     /// The falconeri image to use for init containers (e.g., "ghcr.io/dbcrossbar/falconeri:2.0.0").
     falconeri_image: String,
@@ -175,18 +170,25 @@ struct JobParams<'a> {
 
 impl<'a> JobParams<'a> {
     fn new(pipeline_spec: &'a PipelineSpec, job: &'a Job) -> JobParams<'a> {
-        let job_timeout = pipeline_spec.job_timeout.map(|timeout| timeout.as_secs());
         let falconeri_image = std::env::var("FALCONERI_IMAGE").unwrap_or_else(|_| {
             format!("ghcr.io/dbcrossbar/falconeri:{}", env!("CARGO_PKG_VERSION"))
         });
         let use_local_image = kubernetes::use_local_image();
         Self {
             pipeline_spec,
-            job_timeout,
+            kubernetes_backoff_limit: pipeline_spec
+                .maximum_counted_pod_failures()
+                .kubernetes_backoff_limit(),
+            job_timeout_seconds: pipeline_spec.job_timeout.as_secs(),
             job,
             falconeri_image,
             use_local_image,
         }
+    }
+
+    fn render(&self) -> Result<String> {
+        render_manifest(RUN_MANIFEST_TEMPLATE, self)
+            .context("error rendering job template")
     }
 }
 
@@ -195,29 +197,135 @@ impl<'a> JobParams<'a> {
 pub async fn start_batch_job(pipeline_spec: &PipelineSpec, job: &Job) -> Result<()> {
     debug!("starting batch job on cluster");
 
-    // Set up our template parameters, rendder our template, and deploy it.
-    let params = JobParams::new(pipeline_spec, job);
-    let manifest = render_manifest(RUN_MANIFEST_TEMPLATE, &params)
-        .context("error rendering job template")?;
-    kubernetes::deploy(&manifest).await?;
+    kubernetes::deploy(&JobParams::new(pipeline_spec, job).render()?).await?;
 
     Ok(())
 }
 
-#[test]
-fn render_template() {
-    use falconeri_common::serde_json;
-    use serde_yaml;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let json = include_str!("../../falconeri_common/src/example_pipeline_spec.json");
-    let pipeline_spec: PipelineSpec = serde_json::from_str(json).expect("parse error");
+    struct RenderedJobManifest(serde_json::Value);
 
-    let job = Job::factory();
-    let params = JobParams::new(&pipeline_spec, &job);
+    impl RenderedJobManifest {
+        fn for_pipeline_spec(pipeline_spec: &PipelineSpec) -> Self {
+            Self(
+                serde_yaml::from_str(
+                    &JobParams::new(pipeline_spec, &Job::factory())
+                        .render()
+                        .expect("job manifest should render"),
+                )
+                .expect("rendered job manifest should be valid YAML"),
+            )
+        }
 
-    let manifest = render_manifest(RUN_MANIFEST_TEMPLATE, &params)
-        .expect("error rendering job template");
-    print!("{}", manifest);
-    let _parsed: serde_json::Value =
-        serde_yaml::from_str(&manifest).expect("rendered invalid YAML");
+        fn backoff_limit(&self) -> u64 {
+            self.0["spec"]["backoffLimit"]
+                .as_u64()
+                .expect("backoffLimit should be an integer")
+        }
+
+        fn active_deadline_seconds(&self) -> u64 {
+            self.0["spec"]["activeDeadlineSeconds"]
+                .as_u64()
+                .expect("activeDeadlineSeconds should be an integer")
+        }
+
+        fn pod_failure_policy_rules(&self) -> &[serde_json::Value] {
+            self.0["spec"]["podFailurePolicy"]["rules"]
+                .as_array()
+                .expect("pod failure policy rules should be an array")
+        }
+    }
+
+    fn example_pipeline_spec_json() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../falconeri_common/src/example_pipeline_spec.json"
+        ))
+        .expect("example pipeline spec should parse as JSON")
+    }
+
+    fn example_pipeline_spec() -> PipelineSpec {
+        serde_json::from_value(example_pipeline_spec_json())
+            .expect("example pipeline spec should parse")
+    }
+
+    #[test]
+    fn renders_valid_job_manifest() {
+        RenderedJobManifest::for_pipeline_spec(&example_pipeline_spec());
+    }
+
+    #[test]
+    fn default_failure_budget_allows_two_failures_per_worker() {
+        for (parallelism, expected_backoff_limit) in [(1, 4), (2, 4), (4, 8), (16, 32)]
+        {
+            let mut pipeline_spec = example_pipeline_spec();
+            pipeline_spec.parallelism_spec.constant = parallelism;
+
+            assert_eq!(
+                RenderedJobManifest::for_pipeline_spec(&pipeline_spec).backoff_limit(),
+                expected_backoff_limit,
+                "wrong backoffLimit for parallelism {}",
+                parallelism,
+            );
+        }
+    }
+
+    #[test]
+    fn disruptions_do_not_consume_the_failure_budget() {
+        let rendered_job_manifest =
+            RenderedJobManifest::for_pipeline_spec(&example_pipeline_spec());
+        let rules = rendered_job_manifest.pod_failure_policy_rules();
+
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0]["action"], "Ignore");
+        assert_eq!(rules[0]["onPodConditions"][0]["type"], "DisruptionTarget");
+        // Kubernetes rejects the whole Job if we leave this out.
+        assert_eq!(rules[0]["onPodConditions"][0]["status"], "True");
+    }
+
+    #[test]
+    fn explicit_worker_failure_budget_overrides_default() {
+        let mut pipeline_spec_json = example_pipeline_spec_json();
+        pipeline_spec_json["worker_failure_policy"] = serde_json::json!({
+            "maximum_counted_pod_failures": 40
+        });
+
+        assert_eq!(
+            RenderedJobManifest::for_pipeline_spec(
+                &serde_json::from_value(pipeline_spec_json)
+                    .expect("worker failure policy should parse")
+            )
+            .backoff_limit(),
+            40
+        );
+    }
+
+    #[test]
+    fn job_timeout_becomes_the_active_deadline() {
+        assert_eq!(
+            RenderedJobManifest::for_pipeline_spec(&example_pipeline_spec())
+                .active_deadline_seconds(),
+            300
+        );
+    }
+
+    #[test]
+    fn jobs_without_a_timeout_get_the_three_day_default() {
+        let mut pipeline_spec_json = example_pipeline_spec_json();
+        pipeline_spec_json
+            .as_object_mut()
+            .expect("example pipeline spec should be a JSON object")
+            .remove("job_timeout");
+
+        assert_eq!(
+            RenderedJobManifest::for_pipeline_spec(
+                &serde_json::from_value(pipeline_spec_json)
+                    .expect("pipeline spec without a job timeout should parse")
+            )
+            .active_deadline_seconds(),
+            3 * 24 * 60 * 60
+        );
+    }
 }

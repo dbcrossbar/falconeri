@@ -11,9 +11,7 @@ metadata:
     "created-by": "falconeri"
 spec:
   parallelism: {{pipeline_spec.parallelism_spec.constant}}
-{{#if job_timeout}}
-  activeDeadlineSeconds: {{job_timeout}}
-{{/if}}
+  activeDeadlineSeconds: {{job_timeout_seconds}}
   # Automatically clean up logs and metadata a while after jobs finish.
   ttlSecondsAfterFinished: 86400
   template:
@@ -124,4 +122,12 @@ spec:
           secretName: "{{name}}"
 {{/if}}
 {{/each}}
-  backoffLimit: 4
+  backoffLimit: {{kubernetes_backoff_limit}}
+  podFailurePolicy:
+    rules:
+    # Don't spend the failure budget on pods that Kubernetes shut down itself
+    # (preemption, eviction, node drain). Falconeri retries their datums.
+    - action: Ignore
+      onPodConditions:
+      - type: DisruptionTarget
+        status: "True"

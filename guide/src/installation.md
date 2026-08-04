@@ -2,9 +2,11 @@
 
 To install `falconeri`, you'll need a working Kubernetes cluster and a basic knowledge of Kubernetes. Ideally, your Kubernetes cluster should support cluster autoscaling, allowing it to automatically add and remove servers as needed.
 
+Falconeri needs Kubernetes 1.26 or later. Worker jobs use a Job `podFailurePolicy`, which older clusters will either reject or silently ignore.
+
 We've had good luck with the following:
 
-- Google Kubernetes Engine, running version 1.10.5-gke.0 with permissions `--scopes=gke-default,storage-rw` and SSD boot disks.
+- Google Kubernetes Engine, with permissions `--scopes=gke-default,storage-rw` and SSD boot disks.
 - O'Reilly's _Kubernetes: Up & Running_, which introduces nearly all the Kubernetes features used by Falconeri.
 
 ## Required software
@@ -54,7 +56,6 @@ gcloud container node-pools create falconeri-workers \
     --disk-size=500 \
     --enable-autorepair \
     --machine-type=n1-standard-8 \
-    --node-version=1.11.6-gke.6 \
     --node-taints=fdy.io/falconeri=worker:NoExecute \
     --node-labels=fdy.io/falconeri=worker \
     --disk-type pd-ssd \
