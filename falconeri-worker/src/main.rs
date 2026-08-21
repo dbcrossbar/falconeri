@@ -141,7 +141,7 @@ async fn process_datum(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("could not run {:?}", &cmd[0]))?;
+        .with_context(|| format!("could not run {:?}", cmd[0]))?;
 
     // Tee stdout and stderr using tokio tasks.
     tee_child(&mut child, to_record).await?;
@@ -149,7 +149,7 @@ async fn process_datum(
     let status = child
         .wait()
         .await
-        .with_context(|| format!("error running {:?}", &cmd[0]))?;
+        .with_context(|| format!("error running {:?}", cmd[0]))?;
     if !status.success() {
         return Err(format_err!(
             "command {:?} failed with status {}",
