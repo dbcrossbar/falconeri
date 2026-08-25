@@ -35,8 +35,7 @@ pub async fn run_job(
 
     // Store the spec as we are actually going to run it, including the
     // defaults we filled in above, because `retry_job` reparses it to rerun
-    // this job. (Building this JSON by hand previously omitted `datum_tries`
-    // and wrote `job_timeout` in a format that could not be read back.)
+    // this job.
     let mut pipeline_spec_as_run = pipeline_spec.clone();
     pipeline_spec_as_run.transform = transform;
 
