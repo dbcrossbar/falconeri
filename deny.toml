@@ -7,6 +7,17 @@ ignore = [
     # utoipa-axum -> paste is unmaintained but there's no safe upgrade yet.
     # https://rustsec.org/advisories/RUSTSEC-2024-0436
     "RUSTSEC-2024-0436",
+    # Temporarily holding off on this upgrade since it's a semver-incompatible
+    # bump and the issue only affects MySQL, which we absolutely do not use.
+    #
+    # The unsound cast is in diesel-async's mysql module (src/mysql/row.rs),
+    # which is only compiled when the "mysql" feature is enabled. We enable
+    # only the "postgres" feature, and the advisory itself scopes the bug to
+    # date/time deserialization with an AsyncMysqlConnection. Falconeri uses
+    # PostgreSQL exclusively, so the vulnerable code is neither compiled nor
+    # reachable. Remove when upgrading diesel-async past 0.9.0.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0138
+    "RUSTSEC-2026-0138",
 ]
 
 [licenses]
@@ -71,4 +82,3 @@ skip-tree = [
     { name = "windows-sys", version = "0.45" },
     { name = "windows-sys", version = "0.60" },
 ]
-
