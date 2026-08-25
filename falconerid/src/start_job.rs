@@ -9,7 +9,7 @@ use falconeri_common::{
     manifest::render_manifest,
     pipeline::*,
     prelude::*,
-    serde_json::{self, json},
+    serde_json,
 };
 
 use crate::inputs::input_to_datums;
@@ -33,18 +33,16 @@ pub async fn run_job(
         );
     }
 
+    // Store the spec as we are actually going to run it, including the
+    // defaults we filled in above, because `retry_job` reparses it to rerun
+    // this job.
+    let mut pipeline_spec_as_run = pipeline_spec.clone();
+    pipeline_spec_as_run.transform = transform;
+
     let new_job = NewJob {
         id: job_id,
-        pipeline_spec: json!({
-            "pipeline": pipeline_spec.pipeline,
-            "transform": transform,
-            "parallelism_spec": pipeline_spec.parallelism_spec,
-            "resource_requests": pipeline_spec.resource_requests,
-            "job_timeout": pipeline_spec.job_timeout.map(|timeout| timeout.as_secs()),
-            "node_selector": pipeline_spec.node_selector,
-            "input": pipeline_spec.input,
-            "egress": pipeline_spec.egress,
-        }),
+        pipeline_spec: serde_json::to_value(&pipeline_spec_as_run)
+            .context("could not serialize pipeline spec")?,
         job_name,
         command: pipeline_spec.transform.cmd.clone(),
         egress_uri: pipeline_spec.egress.uri.clone(),
