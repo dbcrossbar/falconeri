@@ -240,3 +240,18 @@ fn parse_pipeline_spec() {
     );
     assert_eq!(parsed.egress.uri, "gs://example-bucket/words/");
 }
+
+/// `falconerid` stores the pipeline spec of every job it runs, and reparses it
+/// when someone retries that job, so every field has to survive the round trip.
+#[test]
+fn round_trips_through_json() {
+    let json = include_str!("example_pipeline_spec.json");
+    let parsed: PipelineSpec = serde_json::from_str(json).expect("parse error");
+
+    let reparsed: PipelineSpec = serde_json::from_value(
+        serde_json::to_value(&parsed).expect("pipeline spec should serialize"),
+    )
+    .expect("serialized pipeline spec should parse again");
+
+    assert_eq!(parsed, reparsed);
+}
