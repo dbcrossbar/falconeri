@@ -46,9 +46,9 @@ spec:
         resources:
           requests:
             cpu: "10m"
-            memory: "16Mi"
+            memory: "64Mi"
           limits:
-            memory: "16Mi"
+            memory: "64Mi"
       containers:
       - name: worker
         image: "{{pipeline_spec.transform.image}}"
