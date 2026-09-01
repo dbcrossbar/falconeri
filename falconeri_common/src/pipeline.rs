@@ -25,11 +25,15 @@ pub struct PipelineSpec {
     pub resource_requests: ResourceRequests,
     /// The maximum number of times to retry a single datum.
     pub datum_tries: Option<u32>,
-    /// Timeout a running job after this many seconds have elapsed.
-    #[serde(default, with = "humantime_serde")]
-    #[schemars(with = "Option<String>")]
-    #[schema(value_type = Option<String>)]
-    pub job_timeout: Option<Duration>,
+    /// Fail a running job once it has run this long.
+    #[serde(
+        default = "PipelineSpec::default_job_timeout",
+        deserialize_with = "PipelineSpec::deserialize_job_timeout",
+        serialize_with = "humantime_serde::serialize"
+    )]
+    #[schemars(with = "String")]
+    #[schema(value_type = String)]
+    pub job_timeout: Duration,
     /// EXTENSION: Kubernetes node selectors describing the nodes where we can
     /// run this job.
     #[serde(default)]
@@ -41,6 +45,33 @@ pub struct PipelineSpec {
 }
 
 impl PipelineSpec {
+    /// How long to let a job run when the pipeline spec doesn't say. Every job
+    /// needs some deadline, because a few ways of failing (an image stuck in
+    /// `ImagePullBackOff`, workers preempted as fast as Kubernetes can replace
+    /// them) never produce the counted pod failures that would otherwise stop
+    /// the job.
+    fn default_job_timeout() -> Duration {
+        Duration::from_secs(3 * 24 * 60 * 60)
+    }
+
+    /// Parse a `job_timeout`. A zero timeout would fail every job the moment it
+    /// started, so treat it as a mistake.
+    fn deserialize_job_timeout<'de, D>(
+        deserializer: D,
+    ) -> std::result::Result<Duration, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let job_timeout: Duration = humantime_serde::deserialize(deserializer)?;
+        if job_timeout.is_zero() {
+            Err(serde::de::Error::custom(
+                "job_timeout must be greater than zero",
+            ))
+        } else {
+            Ok(job_timeout)
+        }
+    }
+
     /// How many failed worker pods Kubernetes should count before failing
     /// this whole job.
     pub fn maximum_counted_pod_failures(&self) -> MaximumCountedPodFailures {
@@ -255,6 +286,13 @@ fn parse_nested_inputs() {
     assert_eq!(parsed, expected);
 }
 
+/// Example pipeline spec for tests.
+#[cfg(test)]
+fn example_pipeline_spec_json() -> serde_json::Value {
+    serde_json::from_str(include_str!("example_pipeline_spec.json"))
+        .expect("example pipeline spec should parse as JSON")
+}
+
 #[test]
 fn parse_pipeline_spec() {
     use serde_json;
@@ -289,7 +327,7 @@ fn parse_pipeline_spec() {
     assert_eq!(parsed.resource_requests.memory, "500Mi");
     assert!((parsed.resource_requests.cpu - 1.2).abs() < f32::EPSILON);
     assert_eq!(parsed.datum_tries, Some(3));
-    assert_eq!(parsed.job_timeout, Some(Duration::from_secs(300)));
+    assert_eq!(parsed.job_timeout, Duration::from_secs(300));
     assert_eq!(parsed.node_selector["node_type"], "falconeri_worker");
     assert_eq!(parsed.transform.image, "somerepo/my_python_nlp");
     assert_eq!(
@@ -301,6 +339,33 @@ fn parse_pipeline_spec() {
         }
     );
     assert_eq!(parsed.egress.uri, "gs://example-bucket/words/");
+}
+
+#[test]
+fn job_timeout_defaults_to_three_days() {
+    let mut pipeline_spec_json = example_pipeline_spec_json();
+    pipeline_spec_json
+        .as_object_mut()
+        .expect("example pipeline spec should be a JSON object")
+        .remove("job_timeout");
+
+    let parsed: PipelineSpec = serde_json::from_value(pipeline_spec_json)
+        .expect("pipeline spec without a job timeout should parse");
+
+    assert_eq!(parsed.job_timeout, Duration::from_secs(3 * 24 * 60 * 60));
+}
+
+#[test]
+fn rejects_zero_job_timeout() {
+    let mut pipeline_spec_json = example_pipeline_spec_json();
+    pipeline_spec_json["job_timeout"] = serde_json::json!("0s");
+
+    let error = serde_json::from_value::<PipelineSpec>(pipeline_spec_json)
+        .expect_err("zero job timeout should be rejected");
+
+    assert!(error
+        .to_string()
+        .contains("job_timeout must be greater than zero"));
 }
 
 /// `falconerid` stores the pipeline spec of every job it runs, and reparses it

@@ -246,7 +246,8 @@ struct JobParams<'a> {
     pipeline_spec: &'a PipelineSpec,
     /// The Kubernetes Job `backoffLimit`.
     kubernetes_backoff_limit: u32,
-    job_timeout: Option<u64>,
+    /// The Kubernetes Job `activeDeadlineSeconds`.
+    job_timeout_seconds: u64,
     job: &'a Job,
     /// The falconeri image to use for init containers (e.g., "ghcr.io/dbcrossbar/falconeri:2.0.0").
     falconeri_image: String,
@@ -256,7 +257,6 @@ struct JobParams<'a> {
 
 impl<'a> JobParams<'a> {
     fn new(pipeline_spec: &'a PipelineSpec, job: &'a Job) -> JobParams<'a> {
-        let job_timeout = pipeline_spec.job_timeout.map(|timeout| timeout.as_secs());
         let falconeri_image = std::env::var("FALCONERI_IMAGE").unwrap_or_else(|_| {
             format!("ghcr.io/dbcrossbar/falconeri:{}", env!("CARGO_PKG_VERSION"))
         });
@@ -266,7 +266,7 @@ impl<'a> JobParams<'a> {
             kubernetes_backoff_limit: pipeline_spec
                 .maximum_counted_pod_failures()
                 .kubernetes_backoff_limit(),
-            job_timeout,
+            job_timeout_seconds: pipeline_spec.job_timeout.as_secs(),
             job,
             falconeri_image,
             use_local_image,
@@ -311,6 +311,12 @@ mod tests {
             self.0["spec"]["backoffLimit"]
                 .as_u64()
                 .expect("backoffLimit should be an integer")
+        }
+
+        fn active_deadline_seconds(&self) -> u64 {
+            self.0["spec"]["activeDeadlineSeconds"]
+                .as_u64()
+                .expect("activeDeadlineSeconds should be an integer")
         }
 
         fn pod_failure_policy_rules(&self) -> &[serde_json::Value] {
@@ -364,5 +370,32 @@ mod tests {
         assert_eq!(rules[0]["onPodConditions"][0]["type"], "DisruptionTarget");
         // Kubernetes rejects the whole Job if we leave this out.
         assert_eq!(rules[0]["onPodConditions"][0]["status"], "True");
+    }
+
+    #[test]
+    fn job_timeout_becomes_the_active_deadline() {
+        assert_eq!(
+            RenderedJobManifest::for_pipeline_spec(&example_pipeline_spec())
+                .active_deadline_seconds(),
+            300
+        );
+    }
+
+    #[test]
+    fn jobs_without_a_timeout_get_the_three_day_default() {
+        let mut pipeline_spec_json = example_pipeline_spec_json();
+        pipeline_spec_json
+            .as_object_mut()
+            .expect("example pipeline spec should be a JSON object")
+            .remove("job_timeout");
+
+        assert_eq!(
+            RenderedJobManifest::for_pipeline_spec(
+                &serde_json::from_value(pipeline_spec_json)
+                    .expect("pipeline spec without a job timeout should parse")
+            )
+            .active_deadline_seconds(),
+            3 * 24 * 60 * 60
+        );
     }
 }
