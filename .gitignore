@@ -5,3 +5,4 @@
 /examples/word-frequencies/falconeri-worker
 /openapi/*.json
 /openapi/*.pdf
+/.worktrees/
