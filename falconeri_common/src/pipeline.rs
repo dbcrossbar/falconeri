@@ -4,7 +4,7 @@
 //!
 //! [pipespec]: http://docs.pachyderm.io/en/latest/reference/pipeline_spec.html
 
-use std::time::Duration;
+use std::{convert::TryFrom, time::Duration};
 
 use schemars::JsonSchema;
 use utoipa::ToSchema;
@@ -12,9 +12,6 @@ use utoipa::ToSchema;
 use crate::{prelude::*, secret::Secret};
 
 /// Represents a pipeline `*.json` file.
-///
-/// (When editing this, be sure to update `run_job` in `start_job.rs` to include
-/// any new files.)
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PipelineSpec {
@@ -41,6 +38,14 @@ pub struct PipelineSpec {
     pub input: Input,
     /// Where to put the data when we're done with it.
     pub egress: Egress,
+}
+
+impl PipelineSpec {
+    /// How many failed worker pods Kubernetes should count before failing
+    /// this whole job.
+    pub fn maximum_counted_pod_failures(&self) -> MaximumCountedPodFailures {
+        MaximumCountedPodFailures::default_for_parallelism(&self.parallelism_spec)
+    }
 }
 
 /// Metadata about this pipeline.
@@ -81,6 +86,63 @@ pub struct Transform {
 pub struct ParallelismSpec {
     /// The number of workers to run.
     pub constant: u32,
+}
+
+/// A budget of failed worker pods, valid as a Kubernetes Job `backoffLimit`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct MaximumCountedPodFailures(u32);
+
+impl MaximumCountedPodFailures {
+    /// Failed pods to allow per worker by default.
+    const DEFAULT_PER_WORKER: u32 = 2;
+    /// The smallest budget we will choose by default, for jobs so small that
+    /// `DEFAULT_PER_WORKER` would leave almost no room for bad luck.
+    const MINIMUM_DEFAULT: u32 = 4;
+    /// The largest value Kubernetes accepts for a Job `backoffLimit`.
+    const MAXIMUM: u32 = i32::MAX.unsigned_abs();
+
+    /// The budget to use when a pipeline spec has no `worker_failure_policy`.
+    /// This scales with the number of workers, because a job with many workers
+    /// is more likely to see unrelated one-off pod failures, and we don't want
+    /// those to kill work that Falconeri would otherwise retry.
+    fn default_for_parallelism(parallelism_spec: &ParallelismSpec) -> Self {
+        Self::try_from(
+            parallelism_spec
+                .constant
+                .saturating_mul(Self::DEFAULT_PER_WORKER)
+                .clamp(Self::MINIMUM_DEFAULT, Self::MAXIMUM),
+        )
+        .expect("clamped default should be a valid backoff limit")
+    }
+
+    /// The value to use for the Kubernetes Job `backoffLimit`.
+    pub fn kubernetes_backoff_limit(self) -> u32 {
+        self.0
+    }
+}
+
+impl TryFrom<u32> for MaximumCountedPodFailures {
+    type Error = String;
+
+    fn try_from(value: u32) -> std::result::Result<Self, Self::Error> {
+        if value == 0 {
+            Err("maximum_counted_pod_failures must be at least 1".to_owned())
+        } else if value > Self::MAXIMUM {
+            Err(format!(
+                "maximum_counted_pod_failures must be no greater than {}",
+                Self::MAXIMUM
+            ))
+        } else {
+            Ok(Self(value))
+        }
+    }
+}
+
+impl From<MaximumCountedPodFailures> for u32 {
+    fn from(maximum_counted_pod_failures: MaximumCountedPodFailures) -> Self {
+        maximum_counted_pod_failures.kubernetes_backoff_limit()
+    }
 }
 
 /// How many resources should we allocate for each worker?
