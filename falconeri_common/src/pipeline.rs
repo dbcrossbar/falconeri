@@ -25,6 +25,8 @@ pub struct PipelineSpec {
     pub resource_requests: ResourceRequests,
     /// The maximum number of times to retry a single datum.
     pub datum_tries: Option<u32>,
+    /// How Kubernetes should handle failed worker pods.
+    pub worker_failure_policy: Option<WorkerFailurePolicy>,
     /// Fail a running job once it has run this long.
     #[serde(
         default = "PipelineSpec::default_job_timeout",
@@ -75,7 +77,14 @@ impl PipelineSpec {
     /// How many failed worker pods Kubernetes should count before failing
     /// this whole job.
     pub fn maximum_counted_pod_failures(&self) -> MaximumCountedPodFailures {
-        MaximumCountedPodFailures::default_for_parallelism(&self.parallelism_spec)
+        match self.worker_failure_policy {
+            Some(worker_failure_policy) => {
+                worker_failure_policy.maximum_counted_pod_failures
+            }
+            None => MaximumCountedPodFailures::default_for_parallelism(
+                &self.parallelism_spec,
+            ),
+        }
     }
 }
 
@@ -117,6 +126,18 @@ pub struct Transform {
 pub struct ParallelismSpec {
     /// The number of workers to run.
     pub constant: u32,
+}
+
+/// Controls when failed worker pods should fail the whole job.
+#[derive(
+    Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize, ToSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerFailurePolicy {
+    /// Fail the job when Kubernetes has counted this many failed worker pods.
+    #[schemars(with = "u32", range(min = 1, max = 2147483647))]
+    #[schema(value_type = u32)]
+    pub maximum_counted_pod_failures: MaximumCountedPodFailures,
 }
 
 /// A budget of failed worker pods, valid as a Kubernetes Job `backoffLimit`.
@@ -327,6 +348,7 @@ fn parse_pipeline_spec() {
     assert_eq!(parsed.resource_requests.memory, "500Mi");
     assert!((parsed.resource_requests.cpu - 1.2).abs() < f32::EPSILON);
     assert_eq!(parsed.datum_tries, Some(3));
+    assert_eq!(parsed.worker_failure_policy, None);
     assert_eq!(parsed.job_timeout, Duration::from_secs(300));
     assert_eq!(parsed.node_selector["node_type"], "falconeri_worker");
     assert_eq!(parsed.transform.image, "somerepo/my_python_nlp");
@@ -339,6 +361,54 @@ fn parse_pipeline_spec() {
         }
     );
     assert_eq!(parsed.egress.uri, "gs://example-bucket/words/");
+}
+
+#[test]
+fn parses_explicit_worker_failure_policy() {
+    let mut pipeline_spec_json = example_pipeline_spec_json();
+    pipeline_spec_json["worker_failure_policy"] = serde_json::json!({
+        "maximum_counted_pod_failures": 40
+    });
+
+    let parsed: PipelineSpec = serde_json::from_value(pipeline_spec_json)
+        .expect("worker failure policy should parse");
+
+    assert_eq!(
+        parsed
+            .maximum_counted_pod_failures()
+            .kubernetes_backoff_limit(),
+        40
+    );
+}
+
+#[test]
+fn rejects_zero_worker_failure_budget() {
+    let mut pipeline_spec_json = example_pipeline_spec_json();
+    pipeline_spec_json["worker_failure_policy"] = serde_json::json!({
+        "maximum_counted_pod_failures": 0
+    });
+
+    let error = serde_json::from_value::<PipelineSpec>(pipeline_spec_json)
+        .expect_err("zero worker failure budget should be rejected");
+
+    assert!(error
+        .to_string()
+        .contains("maximum_counted_pod_failures must be at least 1"));
+}
+
+#[test]
+fn rejects_worker_failure_budget_above_kubernetes_limit() {
+    let mut pipeline_spec_json = example_pipeline_spec_json();
+    pipeline_spec_json["worker_failure_policy"] = serde_json::json!({
+        "maximum_counted_pod_failures": 2147483648_u32
+    });
+
+    let error = serde_json::from_value::<PipelineSpec>(pipeline_spec_json)
+        .expect_err("worker failure budget above Kubernetes limit should fail");
+
+    assert!(error
+        .to_string()
+        .contains("maximum_counted_pod_failures must be no greater than 2147483647"));
 }
 
 #[test]
@@ -372,8 +442,12 @@ fn rejects_zero_job_timeout() {
 /// when someone retries that job, so every field has to survive the round trip.
 #[test]
 fn round_trips_through_json() {
-    let json = include_str!("example_pipeline_spec.json");
-    let parsed: PipelineSpec = serde_json::from_str(json).expect("parse error");
+    let mut pipeline_spec_json = example_pipeline_spec_json();
+    pipeline_spec_json["worker_failure_policy"] = serde_json::json!({
+        "maximum_counted_pod_failures": 40
+    });
+    let parsed: PipelineSpec = serde_json::from_value(pipeline_spec_json)
+        .expect("example pipeline spec should parse");
 
     let reparsed: PipelineSpec = serde_json::from_value(
         serde_json::to_value(&parsed).expect("pipeline spec should serialize"),

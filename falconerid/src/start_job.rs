@@ -373,6 +373,23 @@ mod tests {
     }
 
     #[test]
+    fn explicit_worker_failure_budget_overrides_default() {
+        let mut pipeline_spec_json = example_pipeline_spec_json();
+        pipeline_spec_json["worker_failure_policy"] = serde_json::json!({
+            "maximum_counted_pod_failures": 40
+        });
+
+        assert_eq!(
+            RenderedJobManifest::for_pipeline_spec(
+                &serde_json::from_value(pipeline_spec_json)
+                    .expect("worker failure policy should parse")
+            )
+            .backoff_limit(),
+            40
+        );
+    }
+
+    #[test]
     fn job_timeout_becomes_the_active_deadline() {
         assert_eq!(
             RenderedJobManifest::for_pipeline_spec(&example_pipeline_spec())
