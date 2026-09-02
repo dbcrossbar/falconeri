@@ -97,7 +97,13 @@ sequenceDiagram
         Server->>K8s: List batch jobs
         K8s-->>Server: Job names
         Server->>DB: SELECT running jobs
-        alt K8s job missing for >15min
+        alt K8s job has Failed condition
+            critical Transaction
+                Server->>DB: SELECT job FOR UPDATE
+                Server->>DB: UPDATE job
+                Note over DB: job.status ← Error<br/>job.error_message ← K8s reason
+            end
+        else K8s job missing for >15min
             critical Transaction
                 Server->>DB: SELECT job FOR UPDATE
                 Server->>DB: UPDATE job
@@ -166,6 +172,7 @@ sequenceDiagram
 | *(created)* | `Running` | Job inserted into database |
 | `Running` | `Done` | All datums succeed |
 | `Running` | `Error` | Any datum fails permanently (exhausted retries) |
+| `Running` | `Error` | Kubernetes reports a terminal `Failed` condition |
 | `Running` | `Error` | Babysitter detects K8s job vanished (after 15min) |
 
 ```mermaid
@@ -174,6 +181,7 @@ stateDiagram-v2
     [*] --> Running: created
     Running --> Done: all datums succeed
     Running --> Error: datum fails permanently
+    Running --> Error: K8s job reports Failed
     Running --> Error: K8s job vanished
 ```
 
@@ -243,6 +251,15 @@ stateDiagram-v2
 2. For each running job older than 15 minutes, it checks if a corresponding K8s job exists
 3. If the K8s job is missing (deleted manually, TTL expired, etc.), the job is marked as `Error`
 4. This prevents jobs from being stuck in `Running` state indefinitely
+
+### When Kubernetes marks a job as failed:
+
+1. The babysitter reads the Kubernetes Job's terminal `Failed` condition
+2. It records the Kubernetes reason and message in `job.error_message`
+3. It marks the Falconeri job as `Error`
+4. Datum retries stop because they only run while the Falconeri job remains `Running`
+
+Kubernetes reaches this condition in two ways: the worker pod failure budget runs out, or the job exceeds its `job_timeout`. Both limits are separate from `datum_tries`, which applies to each datum rather than to the job as a whole. A vanished pod can consume one counted pod failure and one attempt for the datum it had reserved. See [the specification](./specification.md) for how the budget is set.
 
 ### When a datum's worker pod vanishes mysteriously:
 

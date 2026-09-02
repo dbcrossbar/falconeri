@@ -34,14 +34,16 @@ To describe an individual datum in a job, you can run:
 falconeri datum describe $DATUM_ID
 ```
 
-## `job retry`
+## **DANGER:** `job retry`
 
-If a job has failed due to an intermittent error, you can re-run just the failed datums using `job retry`:
+If a very large job has failed due to an intermittent error, you can _attempt_ to re-run just the failed datums using `job retry`:
 
 ```sh
 falconeri job retry $JOB_NAME
 ```
 
-Note that this will use the original pipeline specification JSON, and that it will create a new job.
+**WARNING:** This attempts to create a new "chimera" job with the same egress location, containing the completed partial output of the old job, plus fresh datums replacing the originally failed datums. And it writes to the same egress location, which may cause name conflicts or (if you use random output names) duplicated output data. **This is a last resort for trying to fix large jobs that _almost_ finished.** Consider this an operator-level feature, not something routine.
+
+Note that this will use the original pipeline specification JSON, as present in the job record in the database.
 
 **KLUDGE:** If you need to edit the pipeline spec JSON before retrying, you might be able to do so using `falconeri db console` to change the `jobs.pipeline_spec` column. Note that this is not officially supported.

@@ -7,6 +7,24 @@
 //!
 //! Using PostgreSQL to store state is one of the simplest ways to build a
 //! medium-reliability, small-scale distributed job system.
+//!
+//! Basic strategy:
+//!
+//! 1. We query for lists of relevant jobs _outside_ a transaction. This
+//!    includes both database queries and the names of Kubernetes jobs
+//!    meeting certain criteria.
+//! 2. We then loop over all candidates, open a transaction for each, and
+//!    recheck the original query condition immediately. For Kubernetes
+//!    query conditions, which we cannot access atomically, we generally
+//!    try to design our code to rely on the fact that certain state
+//!    transitions are one-way and cannot be reversed.
+//!
+//! When we are inside a transaction with a row lock, **we "own" that job.**
+//! But another copy of the babysitter may be working from a very similar
+//! list of jobs, `falconerid` is talking to `falconeri-worker` instances,
+//! and Kubernetes is doing its own thing. So when working on this file,
+//! **reason about it like a distributed system.** Which means carefully
+//! analyzing how all the components interact.
 
 use std::{panic::AssertUnwindSafe, process, time::Duration};
 
@@ -14,9 +32,17 @@ use falconeri_common::{
     chrono, db,
     diesel_async::{scoped_futures::ScopedFutureExt, AsyncConnection},
     futures_util::FutureExt,
-    kubernetes::get_all_job_names,
+    kubernetes::get_job_info,
     prelude::*,
 };
+
+const MISSING_KUBERNETES_JOB_ERROR: &str = "No corresponding Kubernetes job was found";
+
+/// How long we're willing to hold a job's database row lock while asking
+/// Kubernetes about that job. Generous relative to a healthy API round trip
+/// (on the order of 100ms), but bounds the damage a sick API can do to
+/// workers waiting on the same row.
+const JOB_INFO_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Spawn a tokio task and run the babysitter in it. This should run indefinitely.
 #[instrument(skip_all, level = "trace")]
@@ -78,42 +104,84 @@ async fn check_running_jobs(pool: &db::AsyncPool) -> Result<()> {
     check_for_datums_which_can_be_rerun(&mut conn).await
 }
 
-/// Check for jobs which should already be marked as finished, or which have
-/// vanished off the cluster.
+/// Check for jobs which should already be marked as finished, which have
+/// vanished off the cluster, or which K8s has marked as failed.
 #[instrument(skip_all, level = "debug")]
 async fn check_for_finished_and_vanished_jobs(
     conn: &mut AsyncPgConnection,
 ) -> Result<()> {
     let jobs = Job::find_by_status(Status::Running, conn).await?;
-    let all_job_names = get_all_job_names().await?;
     for mut job in jobs {
-        let all_job_names = &all_job_names;
         conn.transaction(|conn| {
             async move {
                 // We may be racing a second copy of the babysitter here, or a
                 // request from a worker, so start a transaction, take a lock, and
-                // double-check everything before we act on it.
+                // double-check everything before we act on it. This reloads `job`.
+                //
+                // If we're no longer running, we can bail immediately.
                 job.lock_for_update(conn).await?;
+                if job.status != Status::Running {
+                    debug!("job {} is no longer running; skipping", job.job_name);
+                    return Ok(());
+                }
 
                 // Check to see if we should have already marked this job as
                 // finished. This should normally happen automatically, but if it
                 // doesn't, we'll catch it here.
                 //
-                // This will internally retake the lock and open a nested a
+                // This will internally retake the lock and open a nested
                 // transaction, but that should be fine.
                 job.update_status_if_done(conn).await?;
-
-                // If the job has been running for a while, but it has no associated
-                // Kubernetes job, assume that either the job has exceeded
-                // `ttlAfterSecondsFinished`, or was manually deleted by someone.
-                let cutoff = Utc::now().naive_utc() - chrono::Duration::minutes(15);
-                if job.status == Status::Running
-                    && job.created_at < cutoff
-                    && !all_job_names.contains(&job.job_name)
-                {
-                    warn!("job {} is running but has no corresponding Kubernetes job, setting status to 'error'", job.job_name);
-                    job.mark_as_error(conn).await?;
+                if job.status != Status::Running {
+                    debug!("job {} finished, nothing more to do", job.job_name);
+                    return Ok(());
                 }
+
+                // Try to fetch k8s job state. This is a per-job API call made
+                // while holding the job's database row lock, which is why it
+                // gets an explicit timeout.
+                let k8s_info_opt = match get_job_info(&job.job_name, JOB_INFO_TIMEOUT).await {
+                    Ok(info) => info,
+                    Err(e) => {
+                        warn!("could not query Kubernetes for job info: {} (is Kubernetes OK?)", e);
+                        return Ok(());
+                    }
+                };
+
+                // Did we see a job with this name?
+                if let Some(k8s_info) = k8s_info_opt {
+                    // Check whether Kubernetes has marked this job as failed.
+                    if let Some(failure) = &k8s_info.failure {
+                        warn!(
+                            "job {} failed: {}; setting status to 'error'",
+                            job.job_name, failure
+                        );
+                        job.mark_as_error(&failure.to_string(), conn).await?;
+                        return Ok(());
+                    }
+                } else {
+                    // We didn't see the job on Kubernetes.
+                    debug!(
+                        "no Kubernetes job found for job {}; either it hasn't appeared yet or it has disappeared",
+                        job.job_name,
+                    );
+
+                    // If the job has been running for a while, but it has no associated
+                    // Kubernetes job, assume that either the job has exceeded
+                    // `ttlAfterSecondsFinished`, or was manually deleted by someone.
+                    let cutoff = Utc::now().naive_utc() - chrono::Duration::minutes(15);
+                    if job.created_at < cutoff {
+                        warn!(
+                            "job {} failed: {}; setting status to 'error'",
+                            job.job_name, MISSING_KUBERNETES_JOB_ERROR
+                        );
+                        job.mark_as_error(MISSING_KUBERNETES_JOB_ERROR, conn)
+                            .await?;
+                        return Ok(());
+                    }
+                }
+
+                debug!("job {} looks OK; doing nothing", job.job_name);
                 Ok::<_, Error>(())
             }
             .scope_boxed()
@@ -126,6 +194,9 @@ async fn check_for_finished_and_vanished_jobs(
 /// Check for datums which claim to be running in a pod that no longer exists.
 #[instrument(skip_all, level = "debug")]
 async fn check_for_zombie_datums(conn: &mut AsyncPgConnection) -> Result<()> {
+    // `Datum::zombies` returns datums with no matching pod. This includes ones
+    // where the _job_ has errored, both for general cleanup tidiness, and also
+    // to prevent edge cases in `retry`.
     let zombies = Datum::zombies(conn).await?;
     for mut zombie in zombies {
         let zombie_id = zombie.id;
