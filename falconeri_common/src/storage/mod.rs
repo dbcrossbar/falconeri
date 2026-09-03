@@ -12,6 +12,17 @@ use crate::{prelude::*, secret::Secret};
 pub mod gs;
 pub mod s3;
 
+/// A non-recursive listing of a storage "directory": its top-level entries.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Listing {
+    /// Top-level file objects (full URIs; no trailing slash). May include
+    /// marker objects (0-byte objects with a trailing slash, representing
+    /// directories, and the base directory's own marker object).
+    pub files: Vec<String>,
+    /// Top-level subdirectories (full URIs; trailing slash).
+    pub dirs: Vec<String>,
+}
+
 /// Stream a download from the object store to a local file.
 ///
 /// This streams the data in chunks to avoid loading entire files (which may
@@ -94,9 +105,10 @@ pub(crate) async fn stream_upload_from_file(
 /// Abstract interface to different kinds of cloud storage backends.
 #[async_trait]
 pub trait CloudStorage: Send + Sync {
-    /// List all the files and subdirectories immediately present in `uri` if
-    /// `uri` is a directory, or just return `uri` if it points to a file.
-    async fn list(&self, uri: &str) -> Result<Vec<String>>;
+    /// List the top-level entries of the directory `uri`: the files and
+    /// subdirectories immediately present in it. This is non-recursive: the
+    /// contents of subdirectories are not listed.
+    async fn list_nonrecursive(&self, uri: &str) -> Result<Listing>;
 
     /// Synchronize `uri` down to `local_path` recursively. Does not delete any
     /// existing destination files. The contents of `uri` should be exactly

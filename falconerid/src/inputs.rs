@@ -10,6 +10,10 @@
 //!   deterministic function of its inputs, which is what makes the algebra
 //!   testable (see the test harness at the bottom of this file) without
 //!   touching a real bucket.
+//!
+//! Listings are non-recursive: each atom base maps to its top-level entries
+//! (files and subdirectories), which is what the algebra's `"/*"` glob
+//! distributes over.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,7 +22,7 @@ use falconeri_common::{
     pipeline::{Glob, Input},
     prelude::*,
     secret::Secret,
-    storage::CloudStorage,
+    storage::{CloudStorage, Listing},
 };
 
 /// (Local helper type.) The URI of a repository, normalized to end in `/`.
@@ -48,9 +52,9 @@ impl BaseUri {
 }
 
 /// (Local helper type.) The I/O phase's output: each atom base URI mapped to
-/// the objects listed under it.
+/// the top-level entries listed under it.
 #[derive(Clone, Debug, Default)]
-struct BaseUriListings(BTreeMap<BaseUri, Vec<String>>);
+struct BaseUriListings(BTreeMap<BaseUri, Listing>);
 
 impl BaseUriListings {
     fn new() -> Self {
@@ -58,22 +62,40 @@ impl BaseUriListings {
     }
 
     /// Record the listing fetched for `base`.
-    fn insert(&mut self, base: BaseUri, objects: Vec<String>) {
-        self.0.insert(base, objects);
+    fn insert(&mut self, base: BaseUri, listing: Listing) {
+        self.0.insert(base, listing);
     }
 
     /// Look up the listing for `base`.
-    fn get(&self, base: &BaseUri) -> Option<&Vec<String>> {
+    fn get(&self, base: &BaseUri) -> Option<&Listing> {
         self.0.get(base)
     }
 }
+
+/// One slot of a datum name: the repo where the atom's files land, and the
+/// star binding (the top-level entry, `None` for whole-repo atoms).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct Slot {
+    repo: String,
+    binding: Option<String>,
+}
+
+/// The name of a datum: the tuple of slots under crosses, in order.
+///
+/// Two datums with equal names write to the same `/pfs` locations.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct DatumName(Vec<Slot>);
 
 /// (Local helper type.) This is essentially just a `NewDatum` and a
 /// `Vec<NewInputFile>`, but in a more convenient format that works better with
 /// the algorithm in this file, so we don't need to carry around UUIDs
 /// everywhere.
+///
+/// `name` is bookkeeping for the algebra (see [`DatumName`]); it is dropped
+/// when converting to database models.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct DatumData {
+    name: DatumName,
     input_files: Vec<InputFileData>,
 }
 
@@ -150,7 +172,8 @@ pub async fn input_to_datums(
     Ok((all_datums, all_input_files))
 }
 
-/// (I/O phase.) Fetch one listing per atom base URI in `input`.
+/// (I/O phase.) Fetch one (non-recursive) listing per atom base URI in
+/// `input`.
 ///
 /// We list even `Glob::WholeRepo` repos, because we want to verify that we can
 /// actually list the contents of a `Glob::WholeRepo` _before_ spinning up a
@@ -162,7 +185,10 @@ async fn fetch_listings(secrets: &[Secret], input: &Input) -> Result<BaseUriList
     let mut listings = BaseUriListings::new();
     for base in &base_uris {
         let storage = <dyn CloudStorage>::for_uri(base.as_str(), secrets).await?;
-        listings.insert(base.clone(), storage.list(base.as_str()).await?);
+        listings.insert(
+            base.clone(),
+            storage.list_nonrecursive(base.as_str()).await?,
+        );
     }
     Ok(listings)
 }
@@ -190,79 +216,191 @@ fn collect_atom_base_uris_helper(input: &Input, base_uris: &mut BTreeSet<BaseUri
 /// (Pure core.) Interpret an `Input` into a sequence of [`DatumData`], given
 /// pre-fetched listings.
 ///
-/// `listings` maps each atom base URI to the objects listed under it. The I/O
-/// phase ([`fetch_listings`]) is responsible for fetching a listing for
-/// _every_ atom base URI in `input`.
+/// `listings` maps each atom base URI to the top-level entries listed under
+/// it. The I/O phase ([`fetch_listings`]) is responsible for fetching a
+/// listing for _every_ atom base URI in `input`.
 ///
-/// This is a pure, deterministic function of its two inputs.
+/// This is a pure, deterministic function of its two inputs. It fails if the
+/// input would produce rows that clash in the worker's local file system
+/// (see [`verify_local_paths`]).
 fn input_to_datums_pure(
     input: &Input,
     listings: &BaseUriListings,
 ) -> Result<Vec<DatumData>> {
-    match input {
+    let datums = match input {
         Input::Atom { uri, repo, glob } => {
             let base = BaseUri::normalize(uri);
             // The I/O phase fetched a listing for every atom base, so this
             // can only fail if `input_to_datums_pure` was called with an
             // incomplete map (a programmer error).
-            let file_uris = listings.get(&base).expect(
+            let listing = listings.get(&base).expect(
                 "no listing for atom base; the I/O phase must list every atom base",
             );
-            atom_to_datums_pure(&base, repo, *glob, file_uris)
+            atom_to_datums_pure(&base, repo, *glob, listing)
         }
         Input::Union(inputs) => {
-            // Merge all our inputs. We could do this cleverly using `flat_map`
-            // and `collect` to manage the errors, but it's clearer with a `for`
-            // loop.
+            // Merge all our inputs, in child order.
             let mut datums = vec![];
             for child in inputs {
                 datums.extend(input_to_datums_pure(child, listings)?);
             }
-            Ok(datums)
+            datums
         }
-        Input::Cross(inputs) => cross_to_datums_pure(inputs, listings),
+        Input::Cross(inputs) => cross_to_datums_pure(inputs, listings)?,
+    };
+    verify_local_paths(&datums)?;
+    Ok(datums)
+}
+
+/// Verify that each datum's rows can coexist in a single local file system
+/// tree: no row may live at or under a path that another row of the same
+/// datum occupies as a file. For example, `/pfs/R/foo` as a file clashes
+/// with `/pfs/R/foo/` or `/pfs/R/foo/bar`, because the worker downloads all
+/// of a datum's rows into one clean `/pfs`, where a path cannot be both a
+/// file and a directory.
+///
+/// This checks the rows themselves; it cannot see inside the recursive
+/// download of a whole-repo row.
+fn verify_local_paths(datums: &[DatumData]) -> Result<()> {
+    for datum in datums {
+        let paths: BTreeSet<&str> = datum
+            .input_files
+            .iter()
+            .map(|f| f.local_path.as_str())
+            .collect();
+        for file in &paths {
+            if file.ends_with('/') {
+                continue;
+            }
+            // The rule: no other row may start with `file/`, because such a
+            // row would need `file` to be a directory. Paths sharing a
+            // prefix are contiguous in sorted order, so the smallest member
+            // >= `file/` starts with it if and only if any member does.
+            let prefix = format!("{file}/");
+            if let Some(under) = paths.range(prefix.as_str()..).next() {
+                if under.starts_with(prefix.as_str()) {
+                    return Err(format_err!(
+                        "datum rows {file} (a file) and {under} (under it) \
+                         would clash in the worker's local file system"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A top-level entry of a repository: a file or a directory.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Entry {
+    /// A file entry. `uri` does not end in `/`.
+    File { uri: String },
+    /// A directory entry. `uri` ends in `/`.
+    Dir { uri: String },
+}
+
+impl Entry {
+    fn uri(&self) -> &str {
+        match self {
+            Entry::File { uri } | Entry::Dir { uri } => uri,
+        }
     }
 }
 
-/// Interpret a single `Input::Atom` into a list of datums, given the listing
-/// of its base URI.
+/// Turn the raw non-recursive listing of `base` into its top-level entries.
+///
+/// `listing.files` are the file objects directly under `base`; the raw
+/// listing may include marker objects: a 0-byte `base/` for the base
+/// directory itself, and 0-byte `E/` objects for directories.
+/// `listing.dirs` are the subdirectories directly under `base`, each ending
+/// in `/`.
+///
+/// The base marker object is dropped. A directory marker object is a
+/// directory entry, winning the tie-break against its counterpart in
+/// `listing.dirs`; a marker object with no counterpart in `listing.dirs`
+/// names an _empty_ directory, which is still a directory entry.
+///
+/// Entries are returned in name order, files and directories interleaved.
+fn entries_from_listing(base: &BaseUri, listing: &Listing) -> Vec<Entry> {
+    let mut emitted_dirs: BTreeSet<&str> = BTreeSet::new();
+    let mut entries: Vec<Entry> =
+        Vec::with_capacity(listing.files.len() + listing.dirs.len());
+    for uri in &listing.files {
+        if uri.as_str() == base.as_str() {
+            // The base marker object: not an entry.
+            continue;
+        }
+        if uri.ends_with('/') {
+            // A directory marker object: a directory, possibly empty.
+            if emitted_dirs.insert(uri.as_str()) {
+                entries.push(Entry::Dir { uri: uri.clone() });
+            }
+        } else {
+            entries.push(Entry::File { uri: uri.clone() });
+        }
+    }
+    for uri in &listing.dirs {
+        // Skip directories already emitted from their marker object.
+        if emitted_dirs.insert(uri.as_str()) {
+            entries.push(Entry::Dir { uri: uri.clone() });
+        }
+    }
+    entries.sort_by(|entry1, entry2| entry1.uri().cmp(entry2.uri()));
+    entries
+}
+
+/// Interpret a single `Input::Atom` into a list of datums, given the
+/// (non-recursive) listing of its base URI.
 fn atom_to_datums_pure(
     base: &BaseUri,
     repo: &str,
     glob: Glob,
-    file_uris: &[String],
-) -> Result<Vec<DatumData>> {
+    listing: &Listing,
+) -> Vec<DatumData> {
     match glob {
         // Our input file is just the entire repo, as a directory.
-        Glob::WholeRepo => Ok(vec![DatumData {
+        Glob::WholeRepo => vec![DatumData {
+            name: DatumName(vec![Slot {
+                repo: repo.to_owned(),
+                binding: None,
+            }]),
             input_files: vec![InputFileData {
                 uri: base.as_str().to_owned(),
                 local_path: format!("/pfs/{}/", repo),
             }],
-        }]),
+        }],
 
-        // One datum per object in the listing, in listing order.
-        //
-        // KNOWN DEVIATION (pinned by tests below): this is one datum per
-        // _object_, not per _top-level entry_. That is what the current
-        // `object_store`-era storage listing produces. See
-        // `plans/INPUT_ALGEBRA_EXTENSIONS.md`, Appendix A: GCS was
-        // per-top-level-entry from 2019-01 (gsutil `ls` without `-r`) through
-        // the 2026-01 migration to `object_store`, which made GCS per-object
-        // to match S3's recursive listing. Chunk C2 restores the
-        // per-top-level-entry semantics.
+        // One datum per top-level entry (file or directory), in name order.
+        // File entries land at `/pfs/R/E`; directory entries land at
+        // `/pfs/R/E/` (trailing slash), which the worker syncs recursively.
+        // The datum's name binds the repo to the entry `E`.
         Glob::TopLevelDirectoryEntries => {
-            let mut datums = vec![];
-            for file_uri in file_uris {
-                let local_path = uri_to_local_path(base, file_uri, repo)?;
-                datums.push(DatumData {
-                    input_files: vec![InputFileData {
-                        uri: file_uri.clone(),
-                        local_path,
-                    }],
-                });
-            }
-            Ok(datums)
+            let base_len = base.as_str().len();
+            entries_from_listing(base, listing)
+                .into_iter()
+                .map(|entry| {
+                    // The entry name `E` (without any trailing slash) is the
+                    // datum's star binding.
+                    let binding = match &entry {
+                        Entry::File { uri } => uri[base_len..].to_owned(),
+                        Entry::Dir { uri } => uri[base_len..uri.len() - 1].to_owned(),
+                    };
+                    // Listing entries are under `base` (with a non-empty
+                    // base-relative portion) by construction.
+                    let local_path = uri_to_local_path(base, entry.uri(), repo)
+                        .expect("a listing entry should be under its base URI");
+                    DatumData {
+                        name: DatumName(vec![Slot {
+                            repo: repo.to_owned(),
+                            binding: Some(binding),
+                        }]),
+                        input_files: vec![InputFileData {
+                            uri: entry.uri().to_owned(),
+                            local_path,
+                        }],
+                    }
+                })
+                .collect()
         }
     }
 }
@@ -291,7 +429,8 @@ fn cross_to_datums_pure(
             let datums_1 = input_to_datums_pure(&inputs[n - 1], listings)?;
 
             // Build our cross product between the recursive `datums_0` and our
-            // local `datums_1`.
+            // local `datums_1`. Names (slot tuples) and files are both
+            // concatenated in the same order.
             let mut output = vec![];
             for datum_0 in &datums_0 {
                 for datum_1 in &datums_1 {
@@ -302,7 +441,10 @@ fn cross_to_datums_pure(
                     let mut combined = Vec::with_capacity(len_0 + len_1);
                     combined.extend(input_files_0.iter().cloned());
                     combined.extend(input_files_1.iter().cloned());
+                    let mut name = datum_0.name.0.clone();
+                    name.extend(datum_1.name.0.iter().cloned());
                     output.push(DatumData {
+                        name: DatumName(name),
                         input_files: combined,
                     })
                 }
@@ -355,21 +497,33 @@ mod tests {
         Input::Cross(inputs)
     }
 
-    /// Build a `BaseUriListings` from `(base, objects)` pairs.
-    fn listing_map(pairs: &[(&str, &[&str])]) -> BaseUriListings {
+    /// Build a `BaseUriListings` from `(base, files, dirs)` triples.
+    fn listing_map(pairs: &[(&str, &[&str], &[&str])]) -> BaseUriListings {
         let mut listings = BaseUriListings::new();
-        for (base, objects) in pairs {
+        for &(base, files, dirs) in pairs {
             listings.insert(
                 BaseUri::normalize(base),
-                objects.iter().map(|o| o.to_string()).collect(),
+                Listing {
+                    files: files.iter().map(|s| s.to_string()).collect(),
+                    dirs: dirs.iter().map(|s| s.to_string()).collect(),
+                },
             );
         }
         listings
     }
 
-    /// Build a `DatumData` from `(uri, local_path)` pairs.
-    fn datum(files: &[(&str, &str)]) -> DatumData {
+    /// Build a `DatumData` from `(repo, binding)` name slots and
+    /// `(uri, local_path)` file pairs.
+    fn datum(name: &[(&str, Option<&str>)], files: &[(&str, &str)]) -> DatumData {
         DatumData {
+            name: DatumName(
+                name.iter()
+                    .map(|&(repo, binding)| Slot {
+                        repo: repo.to_owned(),
+                        binding: binding.map(|b| b.to_owned()),
+                    })
+                    .collect(),
+            ),
             input_files: files
                 .iter()
                 .map(|&(uri, local_path)| InputFileData {
@@ -386,62 +540,92 @@ mod tests {
     // `"/*"`) is not the target semantics of `plans/INPUT_ALGEBRA_EXTENSIONS.md`
     // §2. See the comment on each test, and on [`atom_to_datums_pure`].
 
-    /// `"/"` (WholeRepo) produces exactly one datum with exactly one file: the
-    /// repo itself, as a directory (trailing slash on both `uri` and
-    /// `local_path`). The listing is irrelevant to the row (but the I/O phase
-    /// still fetches it, to verify listability).
+    /// `"/"` (WholeRepo) produces exactly one datum, named `(repo, no
+    /// binding)`, with exactly one file: the repo itself, as a directory
+    /// (trailing slash on both `uri` and `local_path`). The listing is
+    /// irrelevant to the row (but the I/O phase still fetches it, to verify
+    /// listability).
     #[test]
     fn whole_repo_row_shape() {
         let input = atom("gs://b/data/", "r", Glob::WholeRepo);
-        let map = listing_map(&[("gs://b/data/", &["gs://b/data/a.txt"])]);
+        let map = listing_map(&[("gs://b/data/", &["gs://b/data/a.txt"], &[])]);
         assert_eq!(
             input_to_datums_pure(&input, &map).unwrap(),
-            vec![datum(&[("gs://b/data/", "/pfs/r/")])]
+            vec![datum(&[("r", None)], &[("gs://b/data/", "/pfs/r/")])]
         );
     }
 
-    /// `"/*"` produces one datum per _object_ in the listing, in listing
-    /// order.
+    /// `"/*"` produces one datum per _top-level entry_ (file or directory),
+    /// in name order, nested objects excluded (the listing is
+    /// non-recursive).
     ///
-    /// KNOWN DEVIATION from the plan's §2 semantics (one datum per top-level
-    /// _entry_). This is the `object_store`-era behavior; see Appendix A of
-    /// `plans/INPUT_ALGEBRA_EXTENSIONS.md` for the history. Chunk C2 restores
-    /// the per-entry semantics.
+    /// The listing here exercises the marker rules end to end: the base
+    /// marker object (`gs://b/data/`) is dropped, and the directory marker
+    /// object (`gs://b/data/alpha/`, also a common prefix) yields a single
+    /// directory entry.
     ///
     /// Note the trailing-slash conventions pinned here: a file URI has no
-    /// trailing slash, and a directory (marker) URI keeps it, in both `uri`
-    /// and `local_path`.
+    /// trailing slash, and a directory URI keeps it, in both `uri` and
+    /// `local_path`. The datum name's binding is the entry name `E`.
     #[test]
-    fn star_is_per_object_known_deviation() {
+    fn star_is_per_entry() {
         let input = atom("gs://b/data/", "r", Glob::TopLevelDirectoryEntries);
         let map = listing_map(&[(
             "gs://b/data/",
             &[
+                "gs://b/data/",
                 "gs://b/data/alpha/",
-                "gs://b/data/alpha/main.txt",
                 "gs://b/data/notes.txt",
             ],
+            &["gs://b/data/alpha/"],
         )]);
         assert_eq!(
             input_to_datums_pure(&input, &map).unwrap(),
             vec![
-                datum(&[("gs://b/data/alpha/", "/pfs/r/alpha/")]),
-                datum(&[("gs://b/data/alpha/main.txt", "/pfs/r/alpha/main.txt")]),
-                datum(&[("gs://b/data/notes.txt", "/pfs/r/notes.txt")]),
+                datum(
+                    &[("r", Some("alpha"))],
+                    &[("gs://b/data/alpha/", "/pfs/r/alpha/")]
+                ),
+                datum(
+                    &[("r", Some("notes.txt"))],
+                    &[("gs://b/data/notes.txt", "/pfs/r/notes.txt")]
+                ),
             ]
         );
     }
 
-    /// A listing that contains the base marker object itself (a 0-byte
-    /// `base/`) makes the whole conversion fail, because
-    /// [`uri_to_local_path`] rejects a URI with no base-relative portion.
-    /// (C2 handles marker objects explicitly, in `entries_from_listing`.)
+    /// Marker handling in [`entries_from_listing`]: the base marker object
+    /// is dropped; a directory marker object that is also in `listing.dirs`
+    /// yields a single directory entry (the directory wins the tie-break);
+    /// a directory marker object with _no_ counterpart in `listing.dirs`
+    /// names an empty directory and is still a directory entry. The result
+    /// is in name order, files and directories interleaved.
     #[test]
-    fn star_base_marker_errors() {
-        let input = atom("gs://b/data/", "r", Glob::TopLevelDirectoryEntries);
-        let map =
-            listing_map(&[("gs://b/data/", &["gs://b/data/", "gs://b/data/a.txt"])]);
-        assert!(input_to_datums_pure(&input, &map).is_err());
+    fn entries_from_listing_marker_rules() {
+        let base = BaseUri::normalize("gs://b/data/");
+        let listing = Listing {
+            files: vec![
+                "gs://b/data/".to_owned(),       // base marker: dropped
+                "gs://b/data/alpha/".to_owned(), // marker + dir entry: one dir
+                "gs://b/data/empty/".to_owned(), // marker only: empty dir
+                "gs://b/data/notes.txt".to_owned(),
+            ],
+            dirs: vec!["gs://b/data/alpha/".to_owned()],
+        };
+        assert_eq!(
+            entries_from_listing(&base, &listing),
+            vec![
+                Entry::Dir {
+                    uri: "gs://b/data/alpha/".to_owned(),
+                },
+                Entry::Dir {
+                    uri: "gs://b/data/empty/".to_owned(),
+                },
+                Entry::File {
+                    uri: "gs://b/data/notes.txt".to_owned(),
+                },
+            ]
+        );
     }
 
     /// An atom URI without a trailing `/` is normalized (to end in `/`)
@@ -450,19 +634,22 @@ mod tests {
     /// failed in [`uri_to_local_path`].
     #[test]
     fn atom_uri_without_trailing_slash_is_normalized() {
-        let map = listing_map(&[("gs://b/data/", &["gs://b/data/a.txt"])]);
+        let map = listing_map(&[("gs://b/data/", &["gs://b/data/a.txt"], &[])]);
 
         let input = atom("gs://b/data", "r", Glob::TopLevelDirectoryEntries);
         assert_eq!(
             input_to_datums_pure(&input, &map).unwrap(),
-            vec![datum(&[("gs://b/data/a.txt", "/pfs/r/a.txt")])]
+            vec![datum(
+                &[("r", Some("a.txt"))],
+                &[("gs://b/data/a.txt", "/pfs/r/a.txt")]
+            )]
         );
 
         // `WholeRepo` rows use the normalized URI, as before.
         let input = atom("gs://b/data", "r", Glob::WholeRepo);
         assert_eq!(
             input_to_datums_pure(&input, &map).unwrap(),
-            vec![datum(&[("gs://b/data/", "/pfs/r/")])]
+            vec![datum(&[("r", None)], &[("gs://b/data/", "/pfs/r/")])]
         );
     }
 
@@ -470,8 +657,8 @@ mod tests {
     #[test]
     fn union_concatenates_in_child_order() {
         let map = listing_map(&[
-            ("gs://b/a/", &["gs://b/a/x.txt"]),
-            ("gs://b/b/", &["gs://b/b/y.txt"]),
+            ("gs://b/a/", &["gs://b/a/x.txt"], &[]),
+            ("gs://b/b/", &[], &[]),
         ]);
         let input = union(vec![
             atom("gs://b/a/", "ra", Glob::TopLevelDirectoryEntries),
@@ -480,20 +667,23 @@ mod tests {
         assert_eq!(
             input_to_datums_pure(&input, &map).unwrap(),
             vec![
-                datum(&[("gs://b/a/x.txt", "/pfs/ra/x.txt")]),
-                datum(&[("gs://b/b/", "/pfs/rb/")]),
+                datum(
+                    &[("ra", Some("x.txt"))],
+                    &[("gs://b/a/x.txt", "/pfs/ra/x.txt")]
+                ),
+                datum(&[("rb", None)], &[("gs://b/b/", "/pfs/rb/")]),
             ]
         );
     }
 
     /// `Cross` builds nested loops, left to right: for each datum of the
     /// first input, for each datum of the second, one combined datum whose
-    /// files are concatenated in the same order.
+    /// name slots and files are concatenated in the same order.
     #[test]
     fn cross_nests_left_to_right() {
         let map = listing_map(&[
-            ("gs://b/a/", &["gs://b/a/1.txt", "gs://b/a/2.txt"]),
-            ("gs://b/b/", &["gs://b/b/1.txt", "gs://b/b/2.txt"]),
+            ("gs://b/a/", &["gs://b/a/1.txt", "gs://b/a/2.txt"], &[]),
+            ("gs://b/b/", &["gs://b/b/1.txt", "gs://b/b/2.txt"], &[]),
         ]);
         let input = cross(vec![
             atom("gs://b/a/", "ra", Glob::TopLevelDirectoryEntries),
@@ -502,22 +692,34 @@ mod tests {
         assert_eq!(
             input_to_datums_pure(&input, &map).unwrap(),
             vec![
-                datum(&[
-                    ("gs://b/a/1.txt", "/pfs/ra/1.txt"),
-                    ("gs://b/b/1.txt", "/pfs/rb/1.txt"),
-                ]),
-                datum(&[
-                    ("gs://b/a/1.txt", "/pfs/ra/1.txt"),
-                    ("gs://b/b/2.txt", "/pfs/rb/2.txt"),
-                ]),
-                datum(&[
-                    ("gs://b/a/2.txt", "/pfs/ra/2.txt"),
-                    ("gs://b/b/1.txt", "/pfs/rb/1.txt"),
-                ]),
-                datum(&[
-                    ("gs://b/a/2.txt", "/pfs/ra/2.txt"),
-                    ("gs://b/b/2.txt", "/pfs/rb/2.txt"),
-                ]),
+                datum(
+                    &[("ra", Some("1.txt")), ("rb", Some("1.txt"))],
+                    &[
+                        ("gs://b/a/1.txt", "/pfs/ra/1.txt"),
+                        ("gs://b/b/1.txt", "/pfs/rb/1.txt"),
+                    ]
+                ),
+                datum(
+                    &[("ra", Some("1.txt")), ("rb", Some("2.txt"))],
+                    &[
+                        ("gs://b/a/1.txt", "/pfs/ra/1.txt"),
+                        ("gs://b/b/2.txt", "/pfs/rb/2.txt"),
+                    ]
+                ),
+                datum(
+                    &[("ra", Some("2.txt")), ("rb", Some("1.txt"))],
+                    &[
+                        ("gs://b/a/2.txt", "/pfs/ra/2.txt"),
+                        ("gs://b/b/1.txt", "/pfs/rb/1.txt"),
+                    ]
+                ),
+                datum(
+                    &[("ra", Some("2.txt")), ("rb", Some("2.txt"))],
+                    &[
+                        ("gs://b/a/2.txt", "/pfs/ra/2.txt"),
+                        ("gs://b/b/2.txt", "/pfs/rb/2.txt"),
+                    ]
+                ),
             ]
         );
     }
@@ -535,11 +737,25 @@ mod tests {
     /// `Cross` of a single input is that input.
     #[test]
     fn cross_of_one_input_is_identity() {
-        let map = listing_map(&[("gs://b/a/", &["gs://b/a/x.txt"])]);
+        let map = listing_map(&[("gs://b/a/", &["gs://b/a/x.txt"], &[])]);
         let input = atom("gs://b/a/", "ra", Glob::TopLevelDirectoryEntries);
         assert_eq!(
             input_to_datums_pure(&cross(vec![input.clone()]), &map).unwrap(),
             input_to_datums_pure(&input, &map).unwrap()
+        );
+    }
+
+    /// A datum whose rows would clash in the worker's local file system is
+    /// rejected. The bucket contains both a file `foo` and a file `foo/bar`,
+    /// so the top-level entries include a file `foo` and a directory `foo/`,
+    /// and `Cross` combines both into a single datum, where `/pfs/ra/foo`
+    /// would have to be both a file and a directory.
+    #[test]
+    fn clashing_local_paths_are_rejected() {
+        let map = listing_map(&[("gs://b/a/", &["gs://b/a/foo"], &["gs://b/a/foo/"])]);
+        let input = atom("gs://b/a/", "ra", Glob::TopLevelDirectoryEntries);
+        assert!(
+            input_to_datums_pure(&cross(vec![input.clone(), input]), &map).is_err()
         );
     }
 
@@ -583,50 +799,63 @@ mod tests {
     // ---- Proptest harness -----------------------------------------------------
     //
     // The generators are deliberately small: large enough to hit the
-    // interesting cases (repo-name collisions, nested trees, slash-less atom
-    // URIs, nested objects), small enough to avoid combinatorial explosion
-    // that would dilute the tests with boring cases.
+    // interesting cases (repo-name collisions, directory markers, slash-less
+    // atom URIs), small enough to avoid combinatorial explosion that would
+    // dilute the tests with boring cases.
 
     /// Repo names for atom `repo` fields. A deliberately tiny alphabet, so
     /// that distinct atoms frequently declare the same repo name.
     const REPO_NAMES: &[&str] = &["a", "b"];
 
     /// Base URIs for atom `uri` fields. The listing map always contains both
-    /// bases (with possibly-empty listings), so an atom may reference either.
+    /// base URIs (with possibly-empty listings), so an atom may reference either.
     const BASES: &[&str] = &["gs://b/ra/", "gs://b/rb/"];
 
     /// The two glob forms.
     const GLOBS: &[Glob] = &[Glob::WholeRepo, Glob::TopLevelDirectoryEntries];
 
-    /// Candidate base-relative object paths: files, a directory marker, and
-    /// nested files (the current listing is recursive, so nested objects
-    /// appear in it).
-    const REL_PATHS: &[&str] = &["f1", "f2", "d1/", "d1/f1", "d1/f2"];
+    /// Candidate top-level file names (base-relative).
+    const REL_FILES: &[&str] = &["f1", "f2"];
 
-    /// A synthetic listing map: both bases, each with a small subset (0–4 of
-    /// the 5 candidates) of the candidate objects, in candidate order.
-    fn gen_listing_map() -> impl Strategy<Value = BaseUriListings> {
-        let ra_paths: Vec<String> = REL_PATHS
-            .iter()
-            .map(|p| format!("gs://b/ra/{}", p))
-            .collect();
-        let rb_paths: Vec<String> = REL_PATHS
-            .iter()
-            .map(|p| format!("gs://b/rb/{}", p))
-            .collect();
+    /// Candidate top-level directory names (base-relative).
+    const REL_DIRS: &[&str] = &["d1"];
+
+    /// A synthetic non-recursive listing of `base`: a small subset of the
+    /// candidate files and directories, plus the marker objects (the base
+    /// marker, and each selected directory's marker) to exercise the drop
+    /// and tie-break rules.
+    fn gen_listing(base: &'static str) -> impl Strategy<Value = Listing> {
+        let files: Vec<String> =
+            REL_FILES.iter().map(|p| format!("{base}{p}")).collect();
+        let dirs: Vec<String> =
+            REL_DIRS.iter().map(|p| format!("{base}{p}/")).collect();
         (
-            prop::sample::subsequence(ra_paths, 0..=4),
-            prop::sample::subsequence(rb_paths, 0..=4),
+            prop::sample::subsequence(files, 0..=2),
+            prop::sample::subsequence(dirs, 0..=1),
         )
-            .prop_map(|(ra, rb)| {
-                let mut listings = BaseUriListings::new();
-                listings.insert(BaseUri::normalize("gs://b/ra/"), ra);
-                listings.insert(BaseUri::normalize("gs://b/rb/"), rb);
-                listings
+            .prop_map(move |(files, dirs)| {
+                let mut all_files = files;
+                all_files.push(base.to_owned());
+                all_files.extend(dirs.iter().cloned());
+                Listing {
+                    files: all_files,
+                    dirs,
+                }
             })
     }
 
-    /// A random atom, referencing one of the listed bases. Roughly half the
+    /// A synthetic listing map: both base URIs, each with possibly-empty
+    /// listings.
+    fn gen_listing_map() -> impl Strategy<Value = BaseUriListings> {
+        (gen_listing("gs://b/ra/"), gen_listing("gs://b/rb/")).prop_map(|(ra, rb)| {
+            let mut listings = BaseUriListings::new();
+            listings.insert(BaseUri::normalize("gs://b/ra/"), ra);
+            listings.insert(BaseUri::normalize("gs://b/rb/"), rb);
+            listings
+        })
+    }
+
+    /// A random atom, referencing one of the listed base URIs. Roughly half the
     /// time the URI is given without its trailing slash, to exercise
     /// normalization.
     fn gen_atom() -> impl Strategy<Value = Input> {
@@ -673,21 +902,12 @@ mod tests {
         v
     }
 
-    /// Run the pure core, stringifying any error so results are comparable.
-    fn expand_str(
-        input: &Input,
-        listings: &BaseUriListings,
-    ) -> Result<Vec<DatumData>, String> {
-        input_to_datums_pure(input, listings).map_err(|e| e.to_string())
-    }
-
-    /// Normalize an expansion for "up to permutation" comparison. The
-    /// generators never produce base marker objects, so `input_to_datums_pure` should not
-    /// error; if it does, the error string is compared and the test fails.
-    fn canon(
-        result: Result<Vec<DatumData>, String>,
-    ) -> Result<Vec<DatumData>, String> {
-        result.map(canonical)
+    /// Run the pure core. The generators cannot produce clashing local paths
+    /// (no candidate name is both a file and a directory), so this cannot
+    /// fail.
+    fn expand_ok(input: &Input, listings: &BaseUriListings) -> Vec<DatumData> {
+        input_to_datums_pure(input, listings)
+            .expect("the generators cannot produce clashing local paths")
     }
 
     proptest! {
@@ -697,7 +917,10 @@ mod tests {
             input in gen_input(2),
             listings in gen_listing_map(),
         ) {
-            prop_assert_eq!(expand_str(&input, &listings), expand_str(&input, &listings));
+            prop_assert_eq!(
+                expand_ok(&input, &listings),
+                expand_ok(&input, &listings)
+            );
         }
 
         /// P5: Union is commutative (up to permutation).
@@ -710,8 +933,8 @@ mod tests {
             let ab = union(vec![a.clone(), b.clone()]);
             let ba = union(vec![b, a]);
             prop_assert_eq!(
-                canon(expand_str(&ab, &listings)),
-                canon(expand_str(&ba, &listings))
+                canonical(expand_ok(&ab, &listings)),
+                canonical(expand_ok(&ba, &listings))
             );
         }
 
@@ -726,8 +949,8 @@ mod tests {
             let ab_c = union(vec![union(vec![a.clone(), b.clone()]), c.clone()]);
             let a_bc = union(vec![a, union(vec![b, c])]);
             prop_assert_eq!(
-                canon(expand_str(&ab_c, &listings)),
-                canon(expand_str(&a_bc, &listings))
+                canonical(expand_ok(&ab_c, &listings)),
+                canonical(expand_ok(&a_bc, &listings))
             );
         }
 
@@ -745,8 +968,8 @@ mod tests {
                 cross(vec![a, c]),
             ]);
             prop_assert_eq!(
-                canon(expand_str(&lhs, &listings)),
-                canon(expand_str(&rhs, &listings))
+                canonical(expand_ok(&lhs, &listings)),
+                canonical(expand_ok(&rhs, &listings))
             );
         }
     }
