@@ -38,8 +38,11 @@ The `input` section of a pipeline specification declares the data each worker re
 - `glob` controls how the repo's contents are distributed across datums:
   - `"/"` puts the entire repo in a single datum, at `/pfs/<repo>/`.
   - `"/*"` puts each top-level entry — every file and subdirectory immediately inside the repo — in its own datum, at `/pfs/<repo>/<entry>` (file entries have no trailing slash; subdirectories keep one). A matched subdirectory is delivered whole, as a single unit of work on one worker.
+  - `"/*/path"` puts the subpath `path` of each top-level directory entry in its own datum, at `/pfs/<repo>/<entry>/<path>` (a matched subdirectory keeps its trailing slash and is delivered whole). `path` may be multi-segment (for example `"/*/a/b"`). Top-level file entries have no contents and never match, and an entry that does not contain `path` produces no datum.
 
 Use `"/*"` when each top-level entry is one unit of work. The classic case is a worker function that operates on one subdirectory at a time — say, merging each subdirectory's files into a single output file: for that to be correct under parallel workers, every file of each subdirectory must land in a single datum, which is exactly what `"/*"` provides.
+
+Use `"/*/path"` when each top-level entry is one unit of work but only part of it should be downloaded — say, each entry holds the data alongside caches or intermediates the worker does not need. Whether an entry contains `path` is decided by a single listing probe per entry, so the cost of the glob does not grow with the depth of `path` or with the size of the entries.
 
 On S3, `"/*"` produces one datum per top-level entry on both flat and nested repos. Older falconeri versions produced one datum per S3 object at any depth, so a nested S3 repo now produces fewer, larger datums than before; flat repos (files only, no subdirectories) are unaffected.
 

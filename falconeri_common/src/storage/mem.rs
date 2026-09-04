@@ -7,7 +7,7 @@ use object_store::{
     ObjectStore, ObjectStoreExt, memory::InMemory, path::Path as ObjectPath,
 };
 
-use super::CloudStorage;
+use super::{BucketObject, CloudStorage};
 use crate::{
     prelude::*,
     storage::{CloudStorageForUri, parse_cloud_storage_uri},
@@ -23,16 +23,57 @@ pub struct MemoryStorageResolver {
     bucket_storage_map: HashMap<String, Arc<MemoryStorage>>,
 }
 
+impl MemoryStorageResolver {
+    /// Get the [`MemoryStorage`] for `bucket`, creating it if it doesn't
+    /// exist yet.
+    fn bucket(&mut self, bucket: &str) -> Arc<MemoryStorage> {
+        self.bucket_storage_map
+            .entry(bucket.to_owned())
+            .or_insert_with(|| Arc::new(MemoryStorage::new(bucket)))
+            .to_owned()
+    }
+
+    /// Seed our buckets with a set of [`BucketObject`]s, as if they had really
+    /// been stored there.
+    ///
+    /// Objects are routed to the bucket named in their URI, creating bucket
+    /// storage on demand. Only objects can be seeded: [`InMemory`] cannot
+    /// represent marker objects, so prefixes are _derived_, never stored. A
+    /// test that wants a directory should seed a `.keep` object underneath it;
+    /// a prefix with no seeded contents simply does not exist. (Prefixes still
+    /// flow _out_ of listings, derived from the keys underneath them.)
+    ///
+    /// Object URIs are already percent-encoded, so paths are _parsed_, never
+    /// re-encoded. (This is the opposite of [`MemoryStorage::insert`], which
+    /// takes literal names — see the "two worlds of text" note in [`super`].)
+    ///
+    /// Duplicates are fine: putting the same key twice is a harmless
+    /// overwrite, which lets separately generated fragments share buckets.
+    pub async fn populate(&mut self, objects: &[BucketObject]) -> Result<()> {
+        for object in objects {
+            let (scheme, bucket, path) = parse_cloud_storage_uri(&object.uri)?;
+            assert_eq!(scheme, "memory");
+            let storage = self.bucket(bucket);
+            let payload = object_store::PutPayload::from_static(b"x");
+            let key = ObjectPath::parse(path).with_context(|| {
+                format!("invalid path in entry URI {:?}", object.uri)
+            })?;
+            storage
+                .store
+                .put(&key, payload)
+                .await
+                .with_context(|| format!("cannot populate {}", object.uri))?;
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl CloudStorageForUri for MemoryStorageResolver {
     async fn for_uri(&mut self, bucket_uri: &str) -> Result<Arc<dyn CloudStorage>> {
         let (scheme, bucket, _path) = parse_cloud_storage_uri(bucket_uri)?;
         assert_eq!(scheme, "memory");
-        let storage = self
-            .bucket_storage_map
-            .entry(bucket.to_string())
-            .or_insert_with(|| Arc::new(MemoryStorage::new(bucket)))
-            .to_owned();
+        let storage = self.bucket(bucket);
         Ok(storage as Arc<dyn CloudStorage>)
     }
 }

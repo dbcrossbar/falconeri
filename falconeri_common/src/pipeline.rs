@@ -4,10 +4,12 @@
 //!
 //! [pipespec]: http://docs.pachyderm.io/en/latest/reference/pipeline_spec.html
 
-use std::{convert::TryFrom, time::Duration};
+use std::{borrow::Cow, convert::TryFrom, time::Duration};
 
-use schemars::JsonSchema;
-use utoipa::ToSchema;
+use lazy_static::lazy_static;
+use regex::Regex;
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
+use utoipa::{PartialSchema, ToSchema, openapi};
 
 use crate::{prelude::*, secret::Secret};
 
@@ -233,19 +235,91 @@ pub enum Input {
     Union(Vec<Input>),
 }
 
-/// How to distribute files from an input across workers. We only support two
-/// kinds of glob patterns for now.
-#[derive(
-    Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize, ToSchema,
-)]
+/// How to distribute files from an input across workers.
+///
+/// The three supported forms are `"/"` (the whole repo), `"/*"` (each
+/// top-level entry), and `"/*/path"` (the subpath `path` of each top-level
+/// directory entry). The serde forms are a pattern on a string rather than
+/// an enum of the usual shape, so (de)serialization is manual.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Glob {
-    /// Put each top-level directory entry (file, subdir) its own datum.
-    #[serde(rename = "/*")]
+    /// Put each top-level directory entry (file, subdir) in its own datum.
     TopLevelDirectoryEntries,
 
     /// Put the entire repo in a single datum.
-    #[serde(rename = "/")]
     WholeRepo,
+
+    /// Put the subpath `path` of each top-level directory entry in its own
+    /// datum, named for the entry. `path` is one or more non-empty path
+    /// segments; it may be multi-segment (e.g. `"a/b"`). Top-level file
+    /// entries have no contents and never match.
+    Subpath(String),
+}
+
+impl serde::Serialize for Glob {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Glob::WholeRepo => serializer.serialize_str("/"),
+            Glob::TopLevelDirectoryEntries => serializer.serialize_str("/*"),
+            Glob::Subpath(path) => serializer.serialize_str(&format!("/*/{path}")),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Glob {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "/" => Ok(Glob::WholeRepo),
+            "/*" => Ok(Glob::TopLevelDirectoryEntries),
+            _ => {
+                lazy_static! {
+                    static ref SUBPATH_REGEX: Regex =
+                        Regex::new(r#"^/\*/(?P<subpath>[^/]+(?:/[^/]+)*/?)$"#)
+                            .unwrap();
+                }
+                let Some(captures) = SUBPATH_REGEX.captures(s.as_str()) else {
+                    return Err(serde::de::Error::custom(format!(
+                        "invalid glob {s:?} (expected one of \"/\", \"/*\", or \"/*/<path>\")",
+                    )));
+                };
+                let path = captures.name("subpath").unwrap().as_str();
+                if path.split('/').any(|s| s == "." || s == "..") {
+                    return Err(serde::de::Error::custom(format!(
+                        "invalid glob {s:?}: subpath must not contain \".\" or \"..\""
+                    )));
+                }
+                Ok(Glob::Subpath(path.to_owned()))
+            }
+        }
+    }
+}
+
+impl JsonSchema for Glob {
+    fn schema_name() -> Cow<'static, str> {
+        "Glob".into()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "pattern": r#"^(/|/\*|/\*/[^/]+(?:/[^/]+)*/?)$"#,
+        })
+    }
+}
+
+impl ToSchema for Glob {}
+
+impl PartialSchema for Glob {
+    fn schema() -> openapi::RefOr<openapi::schema::Schema> {
+        <String as PartialSchema>::schema()
+    }
 }
 
 /// Where to put the data when we're done with it.
@@ -257,9 +331,17 @@ pub struct Egress {
     pub uri: String,
 }
 
-#[test]
-fn parse_nested_inputs() {
-    let json = r#"
+/// Test support for pipelines. The proptest-related parts of this need to be
+/// visible to other crates when _they're_ being tested, hence the features.
+#[cfg(any(test, feature = "testing"))]
+pub mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    #[test]
+    fn parse_nested_inputs() {
+        let json = r#"
 {
     "cross": [{
         "pfs": {
@@ -284,181 +366,288 @@ fn parse_nested_inputs() {
     }]
 }
 "#;
-    let parsed: Input = serde_json::from_str(json).expect("parse error");
-    let expected = Input::Cross(vec![
-        Input::Atom {
-            uri: "gs://example-bucket/dewey-decimal-categories/".to_owned(),
-            repo: "dewey-decimal-categories".to_owned(),
-            glob: Glob::WholeRepo,
-        },
-        Input::Union(vec![
+        let parsed: Input = serde_json::from_str(json).expect("parse error");
+        let expected = Input::Cross(vec![
+            Input::Atom {
+                uri: "gs://example-bucket/dewey-decimal-categories/".to_owned(),
+                repo: "dewey-decimal-categories".to_owned(),
+                glob: Glob::WholeRepo,
+            },
+            Input::Union(vec![
+                Input::Atom {
+                    uri: "gs://example-bucket/books/".to_owned(),
+                    repo: "books".to_owned(),
+                    glob: Glob::TopLevelDirectoryEntries,
+                },
+                Input::Atom {
+                    uri: "gs://example-bucket/more-books/".to_owned(),
+                    repo: "more-books".to_owned(),
+                    glob: Glob::TopLevelDirectoryEntries,
+                },
+            ]),
+        ]);
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn glob_rejects_malformed_forms() {
+        for json in [
+            "\"\"",
+            "\"//\"",
+            "\"*\"",
+            "\"/*/\"",
+            "\"/*/.\"",
+            "\"/*/..\"",
+            "\"/*/a//b\"",
+            "\"/p\"",
+        ] {
+            assert!(
+                serde_json::from_str::<Glob>(json).is_err(),
+                "{} should be rejected",
+                json
+            );
+        }
+    }
+
+    /// Example pipeline spec for tests.
+    #[cfg(test)]
+    fn example_pipeline_spec_json() -> serde_json::Value {
+        serde_json::from_str(include_str!("example_pipeline_spec.json"))
+            .expect("example pipeline spec should parse as JSON")
+    }
+
+    #[test]
+    fn parse_pipeline_spec() {
+        use serde_json;
+
+        let json = include_str!("example_pipeline_spec.json");
+        let parsed: PipelineSpec = serde_json::from_str(json).expect("parse error");
+        assert_eq!(parsed.pipeline.name, "book_words");
+        assert_eq!(parsed.transform.cmd[0], "python3");
+        assert_eq!(parsed.transform.env.get("VARNAME").unwrap(), "value");
+        assert_eq!(parsed.transform.secrets.len(), 2);
+        assert_eq!(
+            parsed.transform.secrets[0],
+            Secret::Mount {
+                name: "ssl".to_owned(),
+                mount_path: "/ssl".to_owned(),
+            },
+        );
+        assert_eq!(
+            parsed.transform.secrets[1],
+            Secret::Env {
+                name: "s3".to_owned(),
+                key: "AWS_ACCESS_KEY_ID".to_owned(),
+                env_var: "AWS_ACCESS_KEY_ID".to_owned(),
+                optional: false,
+            },
+        );
+        assert_eq!(
+            parsed.transform.service_account,
+            Some("example-service".to_owned()),
+        );
+        assert_eq!(parsed.parallelism_spec.constant, 10);
+        assert_eq!(parsed.resource_requests.memory, "500Mi");
+        assert!((parsed.resource_requests.cpu - 1.2).abs() < f32::EPSILON);
+        assert_eq!(parsed.datum_tries, Some(3));
+        assert_eq!(parsed.worker_failure_policy, None);
+        assert_eq!(parsed.job_timeout, Duration::from_secs(300));
+        assert_eq!(parsed.node_selector["node_type"], "falconeri_worker");
+        assert_eq!(parsed.transform.image, "somerepo/my_python_nlp");
+        assert_eq!(
+            parsed.input,
             Input::Atom {
                 uri: "gs://example-bucket/books/".to_owned(),
                 repo: "books".to_owned(),
                 glob: Glob::TopLevelDirectoryEntries,
-            },
-            Input::Atom {
-                uri: "gs://example-bucket/more-books/".to_owned(),
-                repo: "more-books".to_owned(),
-                glob: Glob::TopLevelDirectoryEntries,
-            },
-        ]),
-    ]);
-    assert_eq!(parsed, expected);
-}
+            }
+        );
+        assert_eq!(parsed.egress.uri, "gs://example-bucket/words/");
+    }
 
-/// Example pipeline spec for tests.
-#[cfg(test)]
-fn example_pipeline_spec_json() -> serde_json::Value {
-    serde_json::from_str(include_str!("example_pipeline_spec.json"))
-        .expect("example pipeline spec should parse as JSON")
-}
+    #[test]
+    fn parses_explicit_worker_failure_policy() {
+        let mut pipeline_spec_json = example_pipeline_spec_json();
+        pipeline_spec_json["worker_failure_policy"] = serde_json::json!({
+            "maximum_counted_pod_failures": 40
+        });
 
-#[test]
-fn parse_pipeline_spec() {
-    use serde_json;
+        let parsed: PipelineSpec = serde_json::from_value(pipeline_spec_json)
+            .expect("worker failure policy should parse");
 
-    let json = include_str!("example_pipeline_spec.json");
-    let parsed: PipelineSpec = serde_json::from_str(json).expect("parse error");
-    assert_eq!(parsed.pipeline.name, "book_words");
-    assert_eq!(parsed.transform.cmd[0], "python3");
-    assert_eq!(parsed.transform.env.get("VARNAME").unwrap(), "value");
-    assert_eq!(parsed.transform.secrets.len(), 2);
-    assert_eq!(
-        parsed.transform.secrets[0],
-        Secret::Mount {
-            name: "ssl".to_owned(),
-            mount_path: "/ssl".to_owned(),
-        },
-    );
-    assert_eq!(
-        parsed.transform.secrets[1],
-        Secret::Env {
-            name: "s3".to_owned(),
-            key: "AWS_ACCESS_KEY_ID".to_owned(),
-            env_var: "AWS_ACCESS_KEY_ID".to_owned(),
-            optional: false,
-        },
-    );
-    assert_eq!(
-        parsed.transform.service_account,
-        Some("example-service".to_owned()),
-    );
-    assert_eq!(parsed.parallelism_spec.constant, 10);
-    assert_eq!(parsed.resource_requests.memory, "500Mi");
-    assert!((parsed.resource_requests.cpu - 1.2).abs() < f32::EPSILON);
-    assert_eq!(parsed.datum_tries, Some(3));
-    assert_eq!(parsed.worker_failure_policy, None);
-    assert_eq!(parsed.job_timeout, Duration::from_secs(300));
-    assert_eq!(parsed.node_selector["node_type"], "falconeri_worker");
-    assert_eq!(parsed.transform.image, "somerepo/my_python_nlp");
-    assert_eq!(
-        parsed.input,
-        Input::Atom {
-            uri: "gs://example-bucket/books/".to_owned(),
-            repo: "books".to_owned(),
-            glob: Glob::TopLevelDirectoryEntries,
-        }
-    );
-    assert_eq!(parsed.egress.uri, "gs://example-bucket/words/");
-}
+        assert_eq!(
+            parsed
+                .maximum_counted_pod_failures()
+                .kubernetes_backoff_limit(),
+            40
+        );
+    }
 
-#[test]
-fn parses_explicit_worker_failure_policy() {
-    let mut pipeline_spec_json = example_pipeline_spec_json();
-    pipeline_spec_json["worker_failure_policy"] = serde_json::json!({
-        "maximum_counted_pod_failures": 40
-    });
+    #[test]
+    fn rejects_zero_worker_failure_budget() {
+        let mut pipeline_spec_json = example_pipeline_spec_json();
+        pipeline_spec_json["worker_failure_policy"] = serde_json::json!({
+            "maximum_counted_pod_failures": 0
+        });
 
-    let parsed: PipelineSpec = serde_json::from_value(pipeline_spec_json)
-        .expect("worker failure policy should parse");
+        let error = serde_json::from_value::<PipelineSpec>(pipeline_spec_json)
+            .expect_err("zero worker failure budget should be rejected");
 
-    assert_eq!(
-        parsed
-            .maximum_counted_pod_failures()
-            .kubernetes_backoff_limit(),
-        40
-    );
-}
+        assert!(
+            error
+                .to_string()
+                .contains("maximum_counted_pod_failures must be at least 1")
+        );
+    }
 
-#[test]
-fn rejects_zero_worker_failure_budget() {
-    let mut pipeline_spec_json = example_pipeline_spec_json();
-    pipeline_spec_json["worker_failure_policy"] = serde_json::json!({
-        "maximum_counted_pod_failures": 0
-    });
+    #[test]
+    fn rejects_worker_failure_budget_above_kubernetes_limit() {
+        let mut pipeline_spec_json = example_pipeline_spec_json();
+        pipeline_spec_json["worker_failure_policy"] = serde_json::json!({
+            "maximum_counted_pod_failures": 2147483648_u32
+        });
 
-    let error = serde_json::from_value::<PipelineSpec>(pipeline_spec_json)
-        .expect_err("zero worker failure budget should be rejected");
+        let error = serde_json::from_value::<PipelineSpec>(pipeline_spec_json)
+            .expect_err("worker failure budget above Kubernetes limit should fail");
 
-    assert!(
-        error
-            .to_string()
-            .contains("maximum_counted_pod_failures must be at least 1")
-    );
-}
-
-#[test]
-fn rejects_worker_failure_budget_above_kubernetes_limit() {
-    let mut pipeline_spec_json = example_pipeline_spec_json();
-    pipeline_spec_json["worker_failure_policy"] = serde_json::json!({
-        "maximum_counted_pod_failures": 2147483648_u32
-    });
-
-    let error = serde_json::from_value::<PipelineSpec>(pipeline_spec_json)
-        .expect_err("worker failure budget above Kubernetes limit should fail");
-
-    assert!(
-        error.to_string().contains(
+        assert!(error.to_string().contains(
             "maximum_counted_pod_failures must be no greater than 2147483647"
+        ));
+    }
+
+    #[test]
+    fn job_timeout_defaults_to_three_days() {
+        let mut pipeline_spec_json = example_pipeline_spec_json();
+        pipeline_spec_json
+            .as_object_mut()
+            .expect("example pipeline spec should be a JSON object")
+            .remove("job_timeout");
+
+        let parsed: PipelineSpec = serde_json::from_value(pipeline_spec_json)
+            .expect("pipeline spec without a job timeout should parse");
+
+        assert_eq!(parsed.job_timeout, Duration::from_secs(3 * 24 * 60 * 60));
+    }
+
+    #[test]
+    fn rejects_zero_job_timeout() {
+        let mut pipeline_spec_json = example_pipeline_spec_json();
+        pipeline_spec_json["job_timeout"] = serde_json::json!("0s");
+
+        let error = serde_json::from_value::<PipelineSpec>(pipeline_spec_json)
+            .expect_err("zero job timeout should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("job_timeout must be greater than zero")
+        );
+    }
+
+    /// `falconerid` stores the pipeline spec of every job it runs, and reparses it
+    /// when someone retries that job, so every field has to survive the round trip.
+    #[test]
+    fn round_trips_through_json() {
+        let mut pipeline_spec_json = example_pipeline_spec_json();
+        pipeline_spec_json["worker_failure_policy"] = serde_json::json!({
+            "maximum_counted_pod_failures": 40
+        });
+        let parsed: PipelineSpec = serde_json::from_value(pipeline_spec_json)
+            .expect("example pipeline spec should parse");
+
+        let reparsed: PipelineSpec = serde_json::from_value(
+            serde_json::to_value(&parsed).expect("pipeline spec should serialize"),
         )
-    );
-}
+        .expect("serialized pipeline spec should parse again");
 
-#[test]
-fn job_timeout_defaults_to_three_days() {
-    let mut pipeline_spec_json = example_pipeline_spec_json();
-    pipeline_spec_json
-        .as_object_mut()
-        .expect("example pipeline spec should be a JSON object")
-        .remove("job_timeout");
+        assert_eq!(parsed, reparsed);
+    }
 
-    let parsed: PipelineSpec = serde_json::from_value(pipeline_spec_json)
-        .expect("pipeline spec without a job timeout should parse");
+    /// A memoized validator for the [`Input`] schema.
+    #[cfg(test)]
+    fn input_validator() -> &'static jsonschema::Validator {
+        static VALIDATOR: std::sync::OnceLock<jsonschema::Validator> =
+            std::sync::OnceLock::new();
+        VALIDATOR.get_or_init(|| {
+            let schema = schemars::schema_for!(Input);
+            let schema = serde_json::to_value(&schema)
+                .expect("schema should serialize to JSON");
+            jsonschema::validator_for(&schema)
+                .expect("the generated Input schema should itself be valid")
+        })
+    }
 
-    assert_eq!(parsed.job_timeout, Duration::from_secs(3 * 24 * 60 * 60));
-}
+    // ---- Proptest support -------------------------------------------------
+    //
+    // Randomized testing using `proptest`. We keep our data generators small.
+    // They need to be large enough to hit all the interesting corner cases,
+    // but small enough that we _find_ the interesting interactions between
+    // multiple generators, and small enough that we can search quickly.
 
-#[test]
-fn rejects_zero_job_timeout() {
-    let mut pipeline_spec_json = example_pipeline_spec_json();
-    pipeline_spec_json["job_timeout"] = serde_json::json!("0s");
+    prop_compose! {
+        /// Generate a base URL for a "repo" from a limited set.
+        pub fn repo_uri()(bucket in "[a-b]", path in "c|d|e/f", trail in "/?") -> String {
+            format!("memory://{}/{}{}", bucket, path, trail)
+        }
+    }
 
-    let error = serde_json::from_value::<PipelineSpec>(pipeline_spec_json)
-        .expect_err("zero job timeout should be rejected");
+    impl Arbitrary for Glob {
+        type Parameters = ();
+        type Strategy = BoxedStrategy<Self>;
 
-    assert!(
-        error
-            .to_string()
-            .contains("job_timeout must be greater than zero")
-    );
-}
+        fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
+            prop_oneof![
+                Just(Glob::WholeRepo),
+                Just(Glob::TopLevelDirectoryEntries),
+                "a|b|c/|d/e".prop_map(|subpath| Glob::Subpath(subpath.to_owned()))
+            ]
+            .boxed()
+        }
+    }
 
-/// `falconerid` stores the pipeline spec of every job it runs, and reparses it
-/// when someone retries that job, so every field has to survive the round trip.
-#[test]
-fn round_trips_through_json() {
-    let mut pipeline_spec_json = example_pipeline_spec_json();
-    pipeline_spec_json["worker_failure_policy"] = serde_json::json!({
-        "maximum_counted_pod_failures": 40
-    });
-    let parsed: PipelineSpec = serde_json::from_value(pipeline_spec_json)
-        .expect("example pipeline spec should parse");
+    /// Generate arbitrary inputs. Note that we do _not_, at this level, make
+    /// even a slight attempt to avoid name clashes. We use arbitrary input
+    /// values to test our "pure" code, and that doesn't check for duplicate
+    /// names. This allows many algebraic properties to be stated much more
+    /// simply.
+    impl Arbitrary for Input {
+        type Parameters = ();
+        type Strategy = BoxedStrategy<Self>;
 
-    let reparsed: PipelineSpec = serde_json::from_value(
-        serde_json::to_value(&parsed).expect("pipeline spec should serialize"),
-    )
-    .expect("serialized pipeline spec should parse again");
+        fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
+            let leaf = (repo_uri(), "r[123]", any::<Glob>())
+                .prop_map(|(uri, repo, glob)| Input::Atom { uri, repo, glob });
+            leaf.prop_recursive(
+                3, // Max levels deep.
+                8, // Max goal nodes.
+                3, // Max items per collection.
+                |inner| {
+                    prop_oneof![
+                        prop::collection::vec(inner.clone(), 0..3)
+                            .prop_map(Input::Union),
+                        prop::collection::vec(inner.clone(), 0..3)
+                            .prop_map(Input::Cross),
+                    ]
+                },
+            )
+            .boxed()
+        }
+    }
 
-    assert_eq!(parsed, reparsed);
+    proptest! {
+        #[test]
+        fn input_serialize_deserialize_roundtrip(input in any::<Input>()) {
+            let serialized = serde_json::to_string(&input).unwrap();
+            let deserialized: Input = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(input, deserialized);
+        }
+
+        #[test]
+        fn input_serialization_passes_validation(input in any::<Input>()) {
+            let serialized = serde_json::to_value(&input).unwrap();
+            input_validator()
+                .validate(&serialized)
+                .expect("serialized Input should be valid against its own schema");
+        }
+    }
 }

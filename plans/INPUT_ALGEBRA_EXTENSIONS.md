@@ -3,8 +3,13 @@
 **Status:** Revised 2026-09 after a code-history audit (Appendix A) and the
 storage-listing shape decision in C2 (`list` becomes non-recursive). The
 implementation plan near the end proposes a patch series, of which this
-revision is the first patch (C0). C1 landed 2026-09-03; where it deviated
-from this sketch, the sketch has been amended here (see C1).
+revision is the first patch (C0). C1, C2, and C3 landed 2026-09-03; where
+they deviated from this sketch, the sketch has been amended here (see the
+"Amended" notes in C1, C2, and C3). **Further revised 2026-09-25:** the
+storage probe API was reworked before landing (`list_one_entry` /
+`list_subpath_entries` supersede the 2026-09-03 `list_prefix` sketch), and
+the proptest harness landed against real storage code; the C3 notes are
+superseded wherever they conflict — see the "Revised 2026-09-25" notes.
 
 ## 1. Goal
 
@@ -21,7 +26,9 @@ Both extensions must preserve the character of the existing algebra: a simple,
 mathematical structure whose behavior is describable by a handful of laws —
 not an ad-hoc feature list. If the laws are clean, we plan to test them with
 `proptest` (a pure core with a synthetic bucket listing is the intended seam;
-out of scope for this document).
+out of scope for this document). **Revised 2026-09-25:** proptests landed;
+the seam changed from synthetic listings to a pure core over the real I/O
+phase, run against an in-memory storage backend (see C3 tests).
 
 ## 2. Input bucket structure and desired worker layout
 
@@ -152,7 +159,7 @@ sequence is ignored (loop order is an implementation detail).
 | P4 | **Cross distributes over Union**: `C(A, U(B, C)) ≃ U(C(A, B), C(A, C))`. | up to permutation |
 | P5 | **Union is commutative and associative.** | up to permutation |
 | P6 | **Subpath refines star**: for the same repo/URI, every name of `/*/p` appears in `/*` (with the same binding). | exact |
-| P7 | **Name ⇒ footprint** (soundness): equal names write to the same `/pfs` locations, so group-merged datums are footprint-compatible by construction. | exact (structural) |
+| P7 | **Name ⇒ footprint** (soundness): equal names write to the same `/pfs` locations, so group-merged datums are footprint-compatible by construction. Tested as root membership (every file of a datum lives under a `/pfs/<repo>/` root named by one of its slots); the stronger "equal names ⇒ identical rows" is refuted by distinct globs sharing a binding — e.g. the union of `/*` and `/*/p` over one base yields name `(R, E)` with different rows (C3; wording revised 2026-09-25, the earlier "file-plus-directory duality" example did not land). | exact (structural) |
 
 **Known non-law.** Cross does *not* distribute over Group:
 
@@ -191,7 +198,8 @@ pub enum Glob {
 
     /// Put the subpath `path` inside each top-level directory
     /// entry in its own datum, named for the entry. The star
-    /// match is non-recursive: one path component.              // "/*/path"
+    /// match is non-recursive: one path component. `path` may
+    /// be multi-segment.                                       // "/*/path"
     Subpath(String),
 }
 
@@ -433,16 +441,98 @@ test) green, and includes its own tests. This revision of the plan is patch
 - `pipeline.rs`: new variant; custom serde for the string forms (`/`, `/*`,
   `/*/p`); schema described as a pattern'd string. `Glob` gains a `String`
   payload and loses `Copy` (small mechanical ripple).
+  **Amended 2026-09-03 (C3 landed):** the serde impl is fully manual
+  (a derived string enum cannot select a variant on a prefix pattern),
+  and `p` is validated as one or more non-empty path segments.
 - Pure-core arm: one datum per directory entry `E` with `E/p` present
   (a file entry has no contents and never matches), decidable from
   per-entry prefix probes (open question 2): list `base/E/p` with a
   delimiter, and keep only results `== base/E/p` or under `base/E/p/`
   (the bare prefix would also match siblings like `pfoo/`). Probe results
   slot into the same `prefix -> (files, dirs)` seam. `p` matches a file or
-  a directory (a marker-only `p/` counts as an empty directory); v1 is
-  single-segment `p`.
-- Tests: unit (file match, directory match, `E`-is-file never matches,
-  missing `p` yields no datum), serde round-trip, proptest P6 and P7.
+  a directory (a marker-only `p/` counts as an empty directory).
+  **Amended 2026-09-03 (C3 landed):** `p` is multi-segment (per open
+  question 1) at no cost change: the probe is a single call at the exact
+  prefix `base/E/p`, whose cost is independent of `p`'s depth. The probe
+  is a new `CloudStorage::list_prefix` method, because
+  `list_nonrecursive` normalizes its argument to a directory (appending
+  `/`), which would hide the exact-match object. The seam's keys became
+  exact prefixes (plain strings, not normalized bases), so the map type
+  was renamed `Listings`. A probe can match both the exact object and a
+  subtree (the flat key space allows both `E/p` and keys under `E/p/`);
+  that yields **two datums with the same name** `(R, E)`, one per row
+  shape, mirroring the top-level file-plus-directory duality. Combined
+  into one datum (e.g. crossing the atom with itself) it is a local
+  file-system clash, rejected by `verify_local_paths`. `entries_from_listing`
+  is deliberately not reused for the probe: its base-marker rule would
+  misclassify the exact `p` file. Probes are fetched a few at a time
+  (`buffer_unordered(8)`), independently of each other.
+  **Revised 2026-09-25:** the probe API differs from the above. There is no
+  `list_prefix`: a probe is `CloudStorage::list_one_entry(uri)`, returning
+  the entry at `uri` — `Object`, `Prefix` (derived from any key under
+  `uri/`, no marker required), or `None` — and the full `/*/p` walk is
+  `CloudStorage::list_subpath_entries(base_uri, subpath)`: one
+  non-recursive listing of the base, then bounded-concurrent (50-way,
+  with perf rationale in the method docs) probes of each top-level
+  _directory_ entry, dropping misses. Consequences: each probe yields at
+  most one datum per entry — the "two datums with the same name" duality
+  never landed (a probe returns whichever kind it finds first); a bucket
+  with both `E/p` and keys under `E/p/` violates our filesystem invariant
+  and is deliberately not hunted at that depth. There is also no sibling
+  filter step: `object_store`'s segment-basis prefix semantics exclude
+  `pfoo/` directly. `verify_local_paths` never existed either: collision
+  rejection is `check_for_bucket_entry_collisions`
+  (`falconeri_common::storage`), run at listing construction
+  (`BucketListing::prefix_entries`) and over the full post-cross entry set
+  in `input_to_datums` — both _outside_ the pure core, so
+  `input_to_datums_pure` has no reachable user-facing error path (its
+  remaining `Err`s are I/O↔pure contract violations). The seam's subpath
+  keys are `(normalized base, raw subpath)` in a `Listings` struct with
+  separate `base_uris`/`subpath_matches` maps, not "exact prefix" strings.
+- Tests: unit (file match, directory match, multi-segment, `E`-is-file
+  never matches, missing `p` yields no datum, probe sibling exclusion,
+  duality, duality-cross rejection), serde round-trip and malformed-form
+  rejection, proptest P6 and P7 (root membership).
+  **Amended 2026-09-03 (C3 landed):** the proptest listing generator is
+  deliberately free — it emits probes with any outcome, including duality,
+  and does not avoid the input shapes `input_to_datums_pure` rejects. The
+  two-sided laws compare the _partial_ denotation (same defined value, or
+  both rejected — the regroupings only regroup rows, so rejection is in
+  lockstep across the law's sides); the one-sided P7 filters rejected
+  inputs, which have no denotation. The rejection behavior itself is
+  pinned by unit tests.
+  **Revised 2026-09-25 (harness landed; the partial-denotation design above
+  is void — it became unnecessary).** What actually landed:
+  - `falconeri_common::storage::mem::MemoryStorage`, an `object_store`
+    `InMemory`-backed test backend, reached through a new factory trait
+    `CloudStorageForUri` (`CloudStorageResolver` in production,
+    `MemoryStorageResolver` per test — no global state, isolation by object
+    lifetime, feature `testing`).
+  - Generators promoted into `falconeri_common` test support: `Arbitrary
+    for Input` draws atoms over a small `memory://` bucket/path pool, so
+    whether fragments share buckets is itself generated data; an
+    `input_entries` strategy seeds storage guaranteed to match each atom's
+    glob, with zero-match draws deliberately generated. Only objects are
+    seeded (prefixes are derived, never stored; a desired directory is a
+    `.keep` object).
+  - Four laws — determinism, P5 commutes and associates, P4
+    cross-distributes-over-union — running the real I/O phase
+    (`Listings::fetch`) against a fresh `MemoryStorageResolver`, sharing a
+    single `Listings` across a law via a "carrier" `Union` of the law's
+    atoms. This is sound because `fetch` depends only on the atom multiset
+    and bucket contents, and every law regroups a fixed atom multiset; if
+    a future law ever varies the atom multiset across sides, fetch per
+    side instead.
+  - No rejection filtering: the pure core cannot reject generated input
+    (collision checks are outside the law seam), so both sides are always
+    defined. Rejection/collision behavior is pinned at the storage layer
+    instead (`check_for_bucket_entry_collisions`, listing tests in
+    `storage/mod.rs`).
+  - Not landed: proptest P6/P7, and pinned pure-core unit tests for
+    `Glob::Subpath` row shapes (coverage currently rides on the
+    `list_subpath_entries` storage tests plus the soak-clean laws; worth
+    adding unit pins when touching C4). Marker-object behavior is out of
+    reach of `InMemory` and stays pinned by unit-level collision tests.
 - Guide: document `"/*/path"`.
 
 **C4 — `Input::Group`.**
@@ -454,6 +544,11 @@ test) green, and includes its own tests. This revision of the plan is patch
 - Tests: unit (two base URIs sharing a repo name merge into one
   `/pfs/R/<binding>/` directory; distinct repo names are a no-op), proptest
   P1, P2, P3, and the §3.3 non-law pinned as documented behavior.
+  **Note 2026-09-25:** the proptest rig now exists (see the C3 test
+  revision): P1–P3 can reuse `input_and_entries()` + the shared-listings
+  harness. Shared repo names arise naturally from the `r[123]` alphabet;
+  cross-fragment bucket sharing is reachable via the small pool but random,
+  so add a knob to force same-bucket fragments if coverage turns out thin.
 - Design notes to land with this chunk:
   - A migration note for users coming from Pachyderm's `group` input:
     falconeri's merge key is the datum name (repo + star binding), not a

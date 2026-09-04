@@ -69,16 +69,20 @@ struct Listings {
     /// Mapping from `BaseUri` to listings, for expanding
     /// [`Glob::TopLevelDirectoryEntries`].
     base_uris: BTreeMap<BaseUri, BucketListing>,
+    /// Matches for `/*/{subpath}`, for expanding [`Glob::Subpath`].
+    subpath_matches: BTreeMap<(BaseUri, String), Vec<BucketEntry>>,
 }
 
 impl Listings {
     /// I/O phase: Fetch listings from the cloud.
     #[instrument(skip_all, level = "trace")]
-    async fn fetch(secrets: &[Secret], input: &Input) -> Result<Listings> {
+    async fn fetch(
+        resolver: &mut dyn CloudStorageForUri,
+        input: &Input,
+    ) -> Result<Listings> {
         debug!("fetching atom listings");
-        let mut resolver = CloudStorageResolver::new(secrets.to_owned());
         let mut listings = Listings::default();
-        listings.fetch_helper(&mut resolver, input).await?;
+        listings.fetch_helper(resolver, input).await?;
         Ok(listings)
     }
 
@@ -110,6 +114,14 @@ impl Listings {
                             self.base_uris.insert(base.clone(), listing);
                         }
                     }
+                    // Subpaths like "/*/$SUBPATH" are a little tricker.
+                    Glob::Subpath(subpath) => {
+                        let matches = storage
+                            .list_subpath_entries(base.as_str(), subpath)
+                            .await?;
+                        self.subpath_matches
+                            .insert((base.clone(), subpath.clone()), matches);
+                    }
                     // Nothing to fetch, since we'll just use the whole thing.
                     Glob::WholeRepo => {
                         // Just check to make sure this bucket _exists_, so we
@@ -139,6 +151,16 @@ impl Listings {
     /// Look up the listing for `base`.
     fn base_uri_get(&self, base: &BaseUri) -> Option<&BucketListing> {
         self.base_uris.get(base)
+    }
+
+    /// Look up the matches for `{base}/*/{subpath}`.
+    fn subpath_matches_get(
+        &self,
+        base: &BaseUri,
+        subpath: &str,
+    ) -> Option<&Vec<BucketEntry>> {
+        self.subpath_matches
+            .get(&(base.clone(), subpath.to_string()))
     }
 }
 
@@ -226,7 +248,8 @@ pub async fn input_to_datums(
     // The I/O phase: fetch the listings that the pure core needs. This also
     // verifies that every atom is listable _before_ spinning up a big cluster
     // job.
-    let listings = Listings::fetch(secrets, input).await?;
+    let mut resolver = CloudStorageResolver::new(secrets.to_owned());
+    let listings = Listings::fetch(&mut resolver, input).await?;
 
     // The pure core: interpret the input algebra over those listings.
     let datum_datas = input_to_datums_pure(input, &listings)?;
@@ -267,7 +290,7 @@ pub async fn input_to_datums(
 fn input_to_datums_pure(input: &Input, listings: &Listings) -> Result<Vec<DatumData>> {
     match input {
         Input::Atom { uri, repo, glob } => {
-            atom_to_datums_pure(uri, repo, *glob, listings)
+            atom_to_datums_pure(uri, repo, glob, listings)
         }
         Input::Union(inputs) => {
             // Merge all our inputs, in child order. We only do this
@@ -287,7 +310,7 @@ fn input_to_datums_pure(input: &Input, listings: &Listings) -> Result<Vec<DatumD
 fn atom_to_datums_pure(
     uri: &str,
     repo: &str,
-    glob: Glob,
+    glob: &Glob,
     listings: &Listings,
 ) -> Result<Vec<DatumData>> {
     let base = BaseUri::normalize(uri);
@@ -296,6 +319,7 @@ fn atom_to_datums_pure(
         Glob::TopLevelDirectoryEntries => {
             glob_top_level_directory_entries(&base, repo, listings)
         }
+        Glob::Subpath(subpath) => glob_subpath(&base, subpath, repo, listings),
     }
 }
 
@@ -331,7 +355,7 @@ fn glob_top_level_directory_entries(
     // incomplete map (a programmer error).
     let listing = listings
         .base_uri_get(base)
-        .expect("no listing for atom base; the I/O phase must list every atom base");
+        .expect("no listing for atom base; the I/O phase must list every /* atom");
 
     let mut datums = vec![];
     if let BucketListing::PrefixEntries(entries) = listing {
@@ -354,6 +378,79 @@ fn glob_top_level_directory_entries(
                 }],
             });
         }
+    }
+    Ok(datums)
+}
+
+/// Handle [`Glob::Subpath`] (`/*/$SUBPATH`).
+///
+/// Our I/O phase has probed the bucket and given us the matches: the
+/// top-level directory entries `E` where `E/subpath` exists. We make one
+/// datum per match, in the order they are given.
+///
+/// As with `"/*"`, a match is either a file or a directory. Files map to
+/// `/pfs/R/E/subpath`; directories map to `/pfs/R/E/subpath/` (trailing
+/// slash), which the worker syncs recursively.
+///
+/// The datum's name binds the repo to `E`, and deliberately does not
+/// include the subpath. That way `/*/foo` and `/*/bar` over the same base
+/// produce matching names, which is what lets `group` merge them (once
+/// implemented).
+fn glob_subpath(
+    base: &BaseUri,
+    subpath: &str,
+    repo: &str,
+    listings: &Listings,
+) -> Result<Vec<DatumData>> {
+    // Get our entries from the I/O phase. The lookup uses the raw subpath,
+    // since that is what the I/O phase stored under. At this point, we still
+    // distinguish between "/*/a" (can match objects or prefixes) and "/*/a/"
+    // (can only match prefixes). This should have been sorted out by our
+    // implementation of Storage; we only need to remember it.
+    let matches = listings.subpath_matches_get(base, subpath).expect(
+        "no listing for atom base; the I/O phase must list every /*/subpath atom",
+    );
+
+    // Now, we need to normalize slash handling. Changes "subpath/" -> "subpath".
+    let subpath = subpath.strip_suffix('/').unwrap_or(subpath);
+    assert!(!subpath.starts_with('/'));
+
+    // The part of each match's URI we expect after the entry name. Changes "subpath" ->
+    // "/subpath".
+    let subpath_suffix = format!("/{subpath}");
+    let mut datums = vec![];
+    for entry in matches {
+        // Figure out the name of our datum by stripping the base URI and
+        // any trailing slash, then the subpath, giving us just the part
+        // that matches the "*" in "/*" (the top-level entry `E`).
+        //
+        // Start by stripping the slash from _this_ one, too. Changes
+        // "s3://bucket/path/datum/subpath/" ->
+        // "s3://bucket/path/datum/subpath".
+        let slashless_uri = entry.uri().strip_suffix('/').unwrap_or(entry.uri());
+        // Remove the leading bit. Changes "s3://bucket/path/repo/datum/subpath" ->
+        // "datum/subpath".
+        let relative = base.strip_from(slashless_uri)?;
+        // Now strip the trailing bit. Changes "datum/subpath" -> "datum".
+        let binding = relative.strip_suffix(&subpath_suffix).ok_or_else(|| {
+            format_err!(
+                "match {:?} for subpath {subpath:?} does not end in {subpath_suffix:?}",
+                entry.uri()
+            )
+        })?;
+        // Get the local "/pfs" version of the path. Yields
+        // "/pfs/{repo}/{datum}/{subpath}", including any trailing "/".
+        let local_path = uri_to_local_path(base, entry.uri(), repo)?;
+        datums.push(DatumData {
+            name: DatumName(vec![Slot {
+                repo: repo.to_owned(),
+                binding: Some(binding.to_owned()),
+            }]),
+            input_files: vec![InputFileData {
+                entry: entry.to_owned(),
+                local_path,
+            }],
+        });
     }
     Ok(datums)
 }
@@ -428,9 +525,12 @@ fn uri_to_local_path(base: &BaseUri, uri: &str, repo: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use falconeri_common::storage::BucketObject;
+    use std::collections::BTreeSet;
+
+    use falconeri_common::storage::{BucketObject, mem::MemoryStorageResolver};
     use proptest::prelude::*;
+
+    use super::*;
 
     // ---- Test helpers -------------------------------------------------------
 
@@ -702,176 +802,272 @@ mod tests {
         assert_eq!(dpath, "/pfs/myrepo/data1/");
     }
 
-    // ---- Proptest harness -----------------------------------------------------
+    // ---- Proptest support -------------------------------------------------
     //
-    // The generators are deliberately small: large enough to hit the
-    // interesting cases (repo-name collisions, directory markers, slash-less
-    // atom URIs), small enough to avoid combinatorial explosion that would
-    // dilute the tests with boring cases.
+    // Randomized testing using `proptest`. We keep our data generators small.
+    // They need to be large enough to hit all the interesting corner cases,
+    // but small enough that we _find_ the interesting interactions between
+    // multiple generators, and small enough that we can search quickly.
+    //
+    // IMPORTANT: At the "pure" layer, we do not worry about duplicate names.
+    // These are checked for _outside_ the pure layer. This allows our testing
+    // to be much more general and simple.
 
-    /// Repo names for atom `repo` fields. A deliberately tiny alphabet, so
-    /// that distinct atoms frequently declare the same repo name.
-    const REPO_NAMES: &[&str] = &["a", "b"];
-
-    /// Base URIs for atom `uri` fields. The listing map always contains both
-    /// base URIs (with possibly-empty listings), so an atom may reference either.
-    const BASES: &[&str] = &["gs://b/ra/", "gs://b/rb/"];
-
-    /// The two glob forms.
-    const GLOBS: &[Glob] = &[Glob::WholeRepo, Glob::TopLevelDirectoryEntries];
-
-    /// Candidate top-level file names (base-relative).
-    const REL_FILES: &[&str] = &["f1", "f2"];
-
-    /// Candidate top-level directory names (base-relative).
-    const REL_DIRS: &[&str] = &["d1"];
-
-    /// A synthetic non-recursive listing of `base`: a random subset of the
-    /// candidate files and directories.
-    fn gen_listing(base: &'static str) -> impl Strategy<Value = BucketListing> {
-        let files: Vec<String> =
-            REL_FILES.iter().map(|p| format!("{base}{p}")).collect();
-        let dirs: Vec<String> =
-            REL_DIRS.iter().map(|p| format!("{base}{p}/")).collect();
-        (
-            prop::sample::subsequence(files, 0..=REL_FILES.len()),
-            prop::sample::subsequence(dirs, 0..=REL_DIRS.len()),
-        )
-            .prop_map(move |(files, dirs)| {
-                let mut entries = files
-                    .iter()
-                    .map(|p| {
-                        BucketEntry::Object(BucketObject::from_uri_for_test(p, 0))
-                    })
-                    .collect::<Vec<_>>();
-                entries.extend(dirs.iter().map(|p| {
-                    BucketEntry::Prefix(
-                        BucketPrefix::from_uri(p.to_owned())
-                            .expect("invalid bucket prefix"),
-                    )
-                }));
-                BucketListing::prefix_entries(entries).expect("invalid bucket entries")
-            })
+    prop_compose! {
+        /// Generate a single [`BucketEntry`] living inside of `uri`. This is used
+        /// to help populate the contents of our various inputs.
+        fn child_entry(uri: String)(entry_name in "f[12]|d[12]/(\\.keep)?") -> BucketEntry {
+            let mut uri = uri.clone();
+            if !uri.ends_with('/') {
+                uri.push('/');
+            }
+            uri.push_str(&entry_name);
+            if uri.ends_with('/') {
+                BucketEntry::Prefix(BucketPrefix::from_uri(uri).expect("invalid bucket URI"))
+            } else {
+                BucketEntry::Object(BucketObject::from_uri_for_test(&uri, 0))
+            }
+        }
     }
 
-    /// A synthetic listing map: both base URIs, each with possibly-empty
-    /// listings.
-    fn gen_listing_map() -> impl Strategy<Value = Listings> {
-        (gen_listing("gs://b/ra/"), gen_listing("gs://b/rb/")).prop_map(|(ra, rb)| {
-            let mut listings = Listings::default();
-            listings.base_uri_insert(BaseUri::normalize("gs://b/ra/"), ra);
-            listings.base_uri_insert(BaseUri::normalize("gs://b/rb/"), rb);
-            listings
+    /// Generate multiple child entries for a prefix.
+    fn child_entries(uri: String) -> impl Strategy<Value = Vec<BucketEntry>> {
+        prop::collection::vec(child_entry(uri), 0..3)
+    }
+
+    /// Either generate multiple child entries for a prefix, or (if it doesn't end
+    /// in a "/"), possibly return it itself.
+    fn child_entries_or_self(uri: String) -> impl Strategy<Value = Vec<BucketEntry>> {
+        if uri.ends_with('/') {
+            child_entries(uri).boxed()
+        } else {
+            prop_oneof![
+                Just(vec![BucketEntry::Object(BucketObject::from_uri_for_test(
+                    &uri, 0
+                ))]),
+                child_entries(uri),
+            ]
+            .boxed()
+        }
+    }
+
+    /// Strings which will match the wildcard portion of glob.
+    fn glob_wildcard_value() -> impl Strategy<Value = String> {
+        "w[123]"
+    }
+
+    /// Entries for a glob.
+    fn glob_entries(
+        base_uri: BaseUri,
+        glob: Glob,
+    ) -> impl Strategy<Value = Vec<BucketEntry>> {
+        // This involves some moderate proptest shenanigans, almost to the point
+        // of looking suspiciously like Haskell or a hand-rolled monad. If
+        // you're not familiar with monads think of this more like the
+        // pre-`async` days in JavaScript.
+        match glob {
+            Glob::TopLevelDirectoryEntries => glob_wildcard_value()
+                .prop_flat_map(move |wildcard| {
+                    child_entries(format!("{}{wildcard}/", base_uri.as_str()))
+                })
+                .boxed(),
+            // We don't _actually_ need real `child_entries` here, but they
+            // don't hurt except to add some noise and size to our test cases.
+            // This could just be an optional `.keep`, like we do elsewhere.
+            Glob::WholeRepo => child_entries(base_uri.as_str().to_owned()).boxed(),
+            Glob::Subpath(subpath) => glob_wildcard_value()
+                .prop_flat_map(move |wildcard| {
+                    // `child_entries_or_self` handles the case where `subpath`
+                    // is something like `foo.csv` by at least _allowing_ it to
+                    // generate a `BucketObject`.
+                    child_entries_or_self(format!(
+                        "{}{wildcard}/{subpath}",
+                        base_uri.as_str()
+                    ))
+                })
+                .boxed(),
+        }
+    }
+
+    /// Entries for an [`Input`].
+    fn input_entries(input: Input) -> BoxedStrategy<Vec<BucketEntry>> {
+        // This is even fancier than `glob_entries`.
+        match input {
+            // Base case.
+            Input::Atom { uri, glob, .. } => {
+                let base_uri = BaseUri::normalize(&uri);
+                glob_entries(base_uri, glob).boxed()
+            }
+            Input::Cross(inputs) | Input::Union(inputs) => {
+                // Getting tricky here. First, we build a
+                // Vec<BoxedStrategy<Vec<_>>> using the usual tools.
+                let entry_strategies: Vec<BoxedStrategy<Vec<BucketEntry>>> =
+                    inputs.into_iter().map(input_entries).collect();
+                // But a Vec<Strategy<T>> is also a Strategy<Vec<T>>, thanks
+                // to one of the standard impls, so we can reinterpret it like
+                // this. (This `let` is purely for documentation.)
+                let strategy_nested_entries: BoxedStrategy<Vec<Vec<BucketEntry>>> =
+                    entry_strategies.boxed();
+                // And now we can prop_map and flatten this.
+                strategy_nested_entries
+                    .prop_map(|nested_entries: Vec<Vec<BucketEntry>>| {
+                        nested_entries.into_iter().flatten().collect()
+                    })
+                    .boxed()
+            }
+        }
+    }
+
+    /// An input and the related entries.
+    #[derive(Clone, Debug)]
+    struct InputAndEntries {
+        input: Input,
+        entries: Vec<BucketEntry>,
+    }
+
+    /// Generate an input and its entries.
+    fn input_and_entries() -> BoxedStrategy<InputAndEntries> {
+        any::<Input>()
+            .prop_flat_map(|input| {
+                input_entries(input.clone()).prop_map(move |entries| InputAndEntries {
+                    input: input.clone(),
+                    entries,
+                })
+            })
+            .boxed()
+    }
+
+    /// Helper function allowing us to make fast async calls to
+    /// [`MemoryStorageRevolver`] and [`Listings::fetch`].
+    ///
+    /// The `MemoryStorageRevolver` code is asyn
+    fn block_on<F: Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build test runtime")
+            .block_on(f)
+    }
+
+    /// Build a [`Listings`] object for a group of [`InputAndEntries`] objects.
+    fn input_listings(inputs_and_entries: &[&InputAndEntries]) -> Listings {
+        let mut inputs = vec![];
+        let mut objects = BTreeSet::new();
+        for input_and_entries in inputs_and_entries {
+            inputs.push(input_and_entries.input.clone());
+            // This should force deduplication and ordering. Duplicate names are
+            // fine, I _think_, because our `Listings` invariants shouldn't care
+            // what's actually in the buckets, and I _think_ shrinking will be
+            // OK even if it sometimes removes only 1 out of 2 sources of a
+            // BucketEntry. But if something gets weird, keep an eye on this.
+            // We only keep the objects, because cloud buckets can't actually
+            // store prefixes.
+            objects.extend(input_and_entries.entries.iter().cloned().filter_map(
+                |e| match e {
+                    BucketEntry::Object(bucket_object) => Some(bucket_object),
+                    BucketEntry::Prefix(_) => None,
+                },
+            ));
+        }
+
+        // This union could be pretty much any compound type--we're only
+        // using the actual Atom values.
+        let input_union = Input::Union(inputs);
+        let objects = objects.into_iter().collect::<Vec<_>>();
+
+        block_on(async {
+            let mut resolver = MemoryStorageResolver::default();
+            resolver
+                .populate(&objects)
+                .await
+                .expect("error populating storage");
+            Listings::fetch(&mut resolver, &input_union)
+                .await
+                .expect("error fetching listings")
         })
     }
 
-    /// A random atom, referencing one of the listed base URIs. Roughly half the
-    /// time the URI is given without its trailing slash, to exercise
-    /// normalization.
-    fn gen_atom() -> impl Strategy<Value = Input> {
-        (
-            prop::sample::select(BASES),
-            prop::sample::select(REPO_NAMES),
-            prop::sample::select(GLOBS),
-            any::<bool>(),
+    /// Run the pure core.
+    fn input_to_datums_pure_checked(
+        input: &Input,
+        listings: &Listings,
+    ) -> Vec<DatumData> {
+        input_to_datums_pure(input, listings).expect(
+            "our generators should not be able to produce invalid bucket contents",
         )
-            .prop_map(|(uri, repo, glob, slashless)| {
-                let uri = if slashless {
-                    &uri[..uri.len() - 1]
-                } else {
-                    uri
-                };
-                atom(uri, repo, glob)
-            })
-    }
-
-    /// A random atom/cross/union tree, with nesting bounded by `depth`: at
-    /// depth 0 only atoms are generated. Trees therefore contain at most a
-    /// handful of atoms, keeping the datum counts small.
-    fn gen_input(depth: usize) -> BoxedStrategy<Input> {
-        if depth == 0 {
-            return gen_atom().boxed();
-        }
-        prop_oneof![
-            3 => gen_atom().boxed(),
-            2 => prop::collection::vec(gen_input(depth - 1), 1..=2)
-                .prop_map(union)
-                .boxed(),
-            2 => prop::collection::vec(gen_input(depth - 1), 1..=2)
-                .prop_map(cross)
-                .boxed(),
-        ]
-        .boxed()
-    }
-
-    /// Run the pure core. The generators cannot produce clashing local paths
-    /// (no candidate name is both a file and a directory), so this cannot
-    /// fail.
-    fn expand_ok(input: &Input, listings: &Listings) -> Vec<DatumData> {
-        input_to_datums_pure(input, listings)
-            .expect("the generators cannot produce clashing local paths")
     }
 
     proptest! {
         /// Determinism: `input_to_datums_pure` is a pure function of its inputs.
         #[test]
-        fn determinism(
-            input in gen_input(2),
-            listings in gen_listing_map(),
-        ) {
+        fn determinism(input_a in input_and_entries()) {
+            let listings = input_listings(&[&input_a]);
             prop_assert_eq!(
-                expand_ok(&input, &listings),
-                expand_ok(&input, &listings)
+                input_to_datums_pure_checked(&input_a.input, &listings),
+                input_to_datums_pure_checked(&input_a.input, &listings)
             );
         }
 
         /// P5: Union is commutative (up to permutation).
         #[test]
         fn union_commutes(
-            a in gen_input(1),
-            b in gen_input(1),
-            listings in gen_listing_map(),
+            input_a in input_and_entries(),
+            input_b in input_and_entries(),
         ) {
-            let ab = union(vec![a.clone(), b.clone()]);
-            let ba = union(vec![b, a]);
+            // Both sides of the law see the same `Listings`, because they
+            // contain the same atoms: `input_listings` fetches against a
+            // carrier union, and our laws only regroup atoms. See also
+            // `determinism`.
+            let listings = input_listings(&[&input_a, &input_b]);
+            let ab = union(vec![input_a.input.clone(), input_b.input.clone()]);
+            let ba = union(vec![input_b.input, input_a.input]);
             prop_assert_eq!(
-                canonical(expand_ok(&ab, &listings)),
-                canonical(expand_ok(&ba, &listings))
+                canonical(input_to_datums_pure_checked(&ab, &listings)),
+                canonical(input_to_datums_pure_checked(&ba, &listings))
             );
         }
 
         /// P5: Union is associative (up to permutation).
         #[test]
         fn union_associates(
-            a in gen_input(1),
-            b in gen_input(1),
-            c in gen_input(1),
-            listings in gen_listing_map(),
+            input_a in input_and_entries(),
+            input_b in input_and_entries(),
+            input_c in input_and_entries(),
         ) {
-            let ab_c = union(vec![union(vec![a.clone(), b.clone()]), c.clone()]);
-            let a_bc = union(vec![a, union(vec![b, c])]);
+            let listings = input_listings(&[&input_a, &input_b, &input_c]);
+            let ab_c = union(vec![
+                union(vec![input_a.input.clone(), input_b.input.clone()]),
+                input_c.input.clone(),
+            ]);
+            let a_bc = union(vec![
+                input_a.input,
+                union(vec![input_b.input, input_c.input]),
+            ]);
             prop_assert_eq!(
-                canonical(expand_ok(&ab_c, &listings)),
-                canonical(expand_ok(&a_bc, &listings))
+                canonical(input_to_datums_pure_checked(&ab_c, &listings)),
+                canonical(input_to_datums_pure_checked(&a_bc, &listings))
             );
         }
 
         /// P4: Cross distributes over Union (up to permutation).
         #[test]
         fn cross_distributes_over_union(
-            a in gen_input(1),
-            b in gen_input(1),
-            c in gen_input(1),
-            listings in gen_listing_map(),
+            input_a in input_and_entries(),
+            input_b in input_and_entries(),
+            input_c in input_and_entries(),
         ) {
-            let lhs = cross(vec![a.clone(), union(vec![b.clone(), c.clone()])]);
+            let listings = input_listings(&[&input_a, &input_b, &input_c]);
+            let lhs = cross(vec![
+                input_a.input.clone(),
+                union(vec![input_b.input.clone(), input_c.input.clone()]),
+            ]);
             let rhs = union(vec![
-                cross(vec![a.clone(), b]),
-                cross(vec![a, c]),
+                cross(vec![input_a.input.clone(), input_b.input.clone()]),
+                cross(vec![input_a.input, input_c.input]),
             ]);
             prop_assert_eq!(
-                canonical(expand_ok(&lhs, &listings)),
-                canonical(expand_ok(&rhs, &listings))
+                canonical(input_to_datums_pure_checked(&lhs, &listings)),
+                canonical(input_to_datums_pure_checked(&rhs, &listings))
             );
         }
     }

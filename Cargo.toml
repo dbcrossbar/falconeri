@@ -10,6 +10,7 @@ edition = "2024"
 
 [workspace.dependencies]
 futures = "0.3"
+jsonschema = { version = "0.55", default-features = false }
 object_store = { git = "https://github.com/apache/arrow-rs-object-store.git", features = ["aws", "gcp", "fs"] }
 serde = { version = "1.0.70", features = ["derive"] }
 proptest = "1.11.0"
