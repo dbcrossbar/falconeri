@@ -30,7 +30,7 @@ use std::{panic::AssertUnwindSafe, process, time::Duration};
 
 use falconeri_common::{
     chrono, db,
-    diesel_async::{scoped_futures::ScopedFutureExt, AsyncConnection},
+    diesel_async::{AsyncConnection, scoped_futures::ScopedFutureExt},
     futures_util::FutureExt,
     kubernetes::get_job_info,
     prelude::*,

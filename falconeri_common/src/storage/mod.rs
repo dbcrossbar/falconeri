@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::TryStreamExt;
-use object_store::{path::Path as ObjectPath, ObjectStore, ObjectStoreExt};
+use object_store::{ObjectStore, ObjectStoreExt, path::Path as ObjectPath};
 use tokio::{fs as async_fs, io::AsyncWriteExt};
 
 use crate::{prelude::*, secret::Secret};

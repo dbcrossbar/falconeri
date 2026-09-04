@@ -6,13 +6,13 @@ use async_trait::async_trait;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use object_store::{
-    gcp::GoogleCloudStorageBuilder, path::Path as ObjectPath, ObjectStore,
+    ObjectStore, gcp::GoogleCloudStorageBuilder, path::Path as ObjectPath,
 };
 use regex::Regex;
 use tokio::fs as async_fs;
 use walkdir::WalkDir;
 
-use super::{stream_download_to_file, stream_upload_from_file, CloudStorage, Listing};
+use super::{CloudStorage, Listing, stream_download_to_file, stream_upload_from_file};
 use crate::{
     kubernetes::{base64_encoded_optional_secret_string, kubectl_secret},
     prelude::*,

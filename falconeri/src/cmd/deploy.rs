@@ -4,11 +4,11 @@ use std::iter;
 
 use clap::Args;
 use falconeri_common::{
-    base64::{prelude::BASE64_STANDARD, Engine},
+    base64::{Engine, prelude::BASE64_STANDARD},
     kubernetes,
     manifest::render_manifest,
     prelude::*,
-    rand::{distr::Alphanumeric, rngs::StdRng, Rng, SeedableRng},
+    rand::{Rng, SeedableRng, distr::Alphanumeric, rngs::StdRng},
 };
 
 /// The manifest defining secrets for `falconeri`.

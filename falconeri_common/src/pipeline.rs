@@ -391,9 +391,11 @@ fn rejects_zero_worker_failure_budget() {
     let error = serde_json::from_value::<PipelineSpec>(pipeline_spec_json)
         .expect_err("zero worker failure budget should be rejected");
 
-    assert!(error
-        .to_string()
-        .contains("maximum_counted_pod_failures must be at least 1"));
+    assert!(
+        error
+            .to_string()
+            .contains("maximum_counted_pod_failures must be at least 1")
+    );
 }
 
 #[test]
@@ -406,9 +408,11 @@ fn rejects_worker_failure_budget_above_kubernetes_limit() {
     let error = serde_json::from_value::<PipelineSpec>(pipeline_spec_json)
         .expect_err("worker failure budget above Kubernetes limit should fail");
 
-    assert!(error
-        .to_string()
-        .contains("maximum_counted_pod_failures must be no greater than 2147483647"));
+    assert!(
+        error.to_string().contains(
+            "maximum_counted_pod_failures must be no greater than 2147483647"
+        )
+    );
 }
 
 #[test]
@@ -433,9 +437,11 @@ fn rejects_zero_job_timeout() {
     let error = serde_json::from_value::<PipelineSpec>(pipeline_spec_json)
         .expect_err("zero job timeout should be rejected");
 
-    assert!(error
-        .to_string()
-        .contains("job_timeout must be greater than zero"));
+    assert!(
+        error
+            .to_string()
+            .contains("job_timeout must be greater than zero")
+    );
 }
 
 /// `falconerid` stores the pipeline spec of every job it runs, and reparses it

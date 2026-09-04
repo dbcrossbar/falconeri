@@ -2,7 +2,7 @@
 
 use std::{collections::HashSet, env, fmt, iter, process::Stdio, time::Duration};
 
-use rand::{distr::Alphanumeric, rng, Rng};
+use rand::{Rng, distr::Alphanumeric, rng};
 use serde::de::{Deserialize, DeserializeOwned};
 use serde_json;
 use tokio::{io::AsyncWriteExt, process::Command};
@@ -90,7 +90,7 @@ struct Secret<T> {
 pub mod base64_encoded_secret_string {
     use std::result;
 
-    use base64::{prelude::BASE64_STANDARD, Engine};
+    use base64::{Engine, prelude::BASE64_STANDARD};
     use serde::de::{Deserialize, Deserializer, Error as DeError};
 
     /// Deserialize a secret represented as a Base64-encoded UTF-8 string.
@@ -114,7 +114,7 @@ pub mod base64_encoded_secret_string {
 pub mod base64_encoded_optional_secret_string {
     use std::result;
 
-    use base64::{prelude::BASE64_STANDARD, Engine};
+    use base64::{Engine, prelude::BASE64_STANDARD};
     use serde::de::{Deserializer, Error as DeError};
 
     /// Deserialize an optional secret represented as a Base64-encoded UTF-8 string.

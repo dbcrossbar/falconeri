@@ -1,11 +1,12 @@
 [workspace]
 members = ["falconeri", "falconerid", "falconeri-worker", "falconeri_common"]
+resolver = "3"
 
 [workspace.package]
 version = "2.0.0-alpha.5"
 authors = ["Eric Kidd <git@randomhacks.net>"]
-edition = "2018"
 license = "Apache-2.0 OR MIT"
+edition = "2024"
 
 [workspace.dependencies]
 futures = "0.3"
