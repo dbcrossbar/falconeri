@@ -16,8 +16,32 @@ Some notes:
 - The `resource_requests.memory` value is used as both a request and as a hard limit. This is because we've seen too many problems caused by worker nodes that consume unexpectedly large amounts of RAM, forcing other workers (or cluster infrastructure) to be evicted from the node.
 - `node_selector` is optional. When present, it allows you to limit which nodes will be used for workers. This also integrates with Kubernetes cluster autoscaling. The autoscaler will look for a node pool with matching tags, and create as many nodes as required to satisfy the `resource_requests`.
 - `service_account` is optional. This may be used to specify a Kubernetes service account name, allowing access to the Kubernetes API or to third-party integrations such as credentials from Vault.
-- For now, `input.atom` is the only supported input type.
+- `input` declares which data each worker receives. See [Inputs](#inputs) below.
 - `egress.URI` is mandatory.
+
+## Inputs
+
+The `input` section of a pipeline specification declares the data each worker receives. Data is materialized under `/pfs` in the worker container, in a directory per `repo` name.
+
+```json
+"input": {
+    "atom": {
+        "repo": "my-data",
+        "URI": "gs://my-bucket/inputs/",
+        "glob": "/*"
+    }
+}
+```
+
+- `repo` is the name of the directory the input lands in: `/pfs/my-data/`.
+- `URI` is a cloud URI to the input "repo", a directory in your bucket.
+- `glob` controls how the repo's contents are distributed across datums:
+  - `"/"` puts the entire repo in a single datum, at `/pfs/<repo>/`.
+  - `"/*"` puts each top-level entry — every file and subdirectory immediately inside the repo — in its own datum, at `/pfs/<repo>/<entry>` (file entries have no trailing slash; subdirectories keep one). A matched subdirectory is delivered whole, as a single unit of work on one worker.
+
+Use `"/*"` when each top-level entry is one unit of work. The classic case is a worker function that operates on one subdirectory at a time — say, merging each subdirectory's files into a single output file: for that to be correct under parallel workers, every file of each subdirectory must land in a single datum, which is exactly what `"/*"` provides.
+
+On S3, `"/*"` produces one datum per top-level entry on both flat and nested repos. Older falconeri versions produced one datum per S3 object at any depth, so a nested S3 repo now produces fewer, larger datums than before; flat repos (files only, no subdirectories) are unaffected.
 
 ## The worker pod failure budget
 

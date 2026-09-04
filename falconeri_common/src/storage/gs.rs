@@ -12,7 +12,7 @@ use regex::Regex;
 use tokio::fs as async_fs;
 use walkdir::WalkDir;
 
-use super::{stream_download_to_file, stream_upload_from_file, CloudStorage};
+use super::{stream_download_to_file, stream_upload_from_file, CloudStorage, Listing};
 use crate::{
     kubernetes::{base64_encoded_optional_secret_string, kubectl_secret},
     prelude::*,
@@ -116,7 +116,7 @@ impl fmt::Debug for GoogleCloudStorage {
 #[async_trait]
 impl CloudStorage for GoogleCloudStorage {
     #[instrument(skip_all, fields(uri = %uri), level = "trace")]
-    async fn list(&self, uri: &str) -> Result<Vec<String>> {
+    async fn list_nonrecursive(&self, uri: &str) -> Result<Listing> {
         trace!("listing {}", uri);
 
         let (bucket, key) = parse_gs_url(uri)?;
@@ -131,21 +131,24 @@ impl CloudStorage for GoogleCloudStorage {
             Some(ObjectPath::from(prefix.as_str()))
         };
 
-        let mut results = Vec::new();
-        let mut stream = self.store.list(prefix_path.as_ref());
-
-        while let Some(meta) = stream
-            .try_next()
+        let list_result = self
+            .store
+            .list_with_delimiter(prefix_path.as_ref())
             .await
-            .context("error listing GCS objects")?
-        {
-            let path_str = meta.location.to_string();
-            if path_str != prefix {
-                results.push(format!("gs://{}/{}", bucket, path_str));
-            }
-        }
+            .context("error listing GCS objects")?;
 
-        Ok(results)
+        let files = list_result
+            .objects
+            .iter()
+            .map(|meta| format!("gs://{}/{}", bucket, meta.location))
+            .collect();
+        let dirs = list_result
+            .common_prefixes
+            .iter()
+            .map(|path| format!("gs://{}/{}", bucket, path))
+            .collect();
+
+        Ok(Listing { files, dirs })
     }
 
     #[instrument(skip_all, fields(uri = %uri, local_path = %local_path.display()), level = "trace")]
