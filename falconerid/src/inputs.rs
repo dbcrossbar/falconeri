@@ -15,14 +15,18 @@
 //! (files and subdirectories), which is what the algebra's `"/*"` glob
 //! distributes over.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
+use async_recursion::async_recursion;
 use falconeri_common::{
     models::{NewDatum, NewInputFile},
     pipeline::{Glob, Input},
     prelude::*,
     secret::Secret,
-    storage::{CloudStorage, Listing},
+    storage::{
+        BucketEntry, BucketListing, BucketPrefix, CloudStorage,
+        check_for_bucket_entry_collisions,
+    },
 };
 
 /// (Local helper type.) The URI of a repository, normalized to end in `/`.
@@ -49,26 +53,88 @@ impl BaseUri {
     fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Strip this base URI from a path.
+    fn strip_from<'p>(&self, path: &'p str) -> Result<&'p str> {
+        path.strip_prefix(&self.0).ok_or_else(|| {
+            format_err!("path {path:?} expected to start with {self:?} but didn't")
+        })
+    }
 }
 
-/// (Local helper type.) The I/O phase's output: each atom base URI mapped to
-/// the top-level entries listed under it.
+/// The I/O phase's output: All the information we need from a cloud bucket in
+/// order to run the pure phase of our algorithm.
 #[derive(Clone, Debug, Default)]
-struct BaseUriListings(BTreeMap<BaseUri, Listing>);
+struct Listings {
+    /// Mapping from `BaseUri` to listings, for expanding
+    /// [`Glob::TopLevelDirectoryEntries`].
+    base_uris: BTreeMap<BaseUri, BucketListing>,
+}
 
-impl BaseUriListings {
-    fn new() -> Self {
-        Self::default()
+impl Listings {
+    /// I/O phase: Fetch listings from the cloud.
+    #[instrument(skip_all, level = "trace")]
+    async fn fetch(secrets: &[Secret], input: &Input) -> Result<Listings> {
+        debug!("fetching atom listings");
+        let mut listings = Listings::default();
+        listings.fetch_helper(secrets, input).await?;
+        Ok(listings)
     }
 
-    /// Record the listing fetched for `base`.
-    fn insert(&mut self, base: BaseUri, listing: Listing) {
-        self.0.insert(base, listing);
+    /// Internal fetch helper.
+    #[async_recursion]
+    async fn fetch_helper(&mut self, secrets: &[Secret], input: &Input) -> Result<()> {
+        match input {
+            Input::Atom { uri, glob, .. } => {
+                let base = BaseUri::normalize(uri);
+                let storage =
+                    <dyn CloudStorage>::for_uri(base.as_str(), secrets).await?;
+                match glob {
+                    // We need a listing to handle "/*", so fetch it.
+                    Glob::TopLevelDirectoryEntries => {
+                        // Don't look it up if we already have it.
+                        if !self.base_uris.contains_key(&base) {
+                            let listing =
+                                storage.list_nonrecursive(base.as_str()).await?;
+                            // BaseUri::normalize should force the URI to end in
+                            // "/", which should in turn force
+                            // `BucketListing::PrefixEntries`.
+                            assert!(matches!(
+                                listing,
+                                BucketListing::PrefixEntries(_),
+                            ));
+                            self.base_uris.insert(base.clone(), listing);
+                        }
+                    }
+                    // Nothing to fetch, since we'll just use the whole thing.
+                    Glob::WholeRepo => {
+                        // Just check to make sure this bucket _exists_, so we
+                        // can provide errors earlier.
+                        let _ = storage.list_nonrecursive(base.as_str()).await?;
+                    }
+                }
+            }
+            Input::Cross(inputs) | Input::Union(inputs) => {
+                for input in inputs {
+                    // Call recursively. We need `boxed_local` so that the impl
+                    // Future type created by this function isn't an infinitely
+                    // recursive type.
+                    self.fetch_helper(secrets, input).await?;
+                }
+            }
+        }
+        Ok::<_, Error>(())
+    }
+
+    /// (Test only.) Insert a listing for `base` into the listings.
+    #[cfg(test)]
+    fn base_uri_insert(&mut self, base: BaseUri, listing: BucketListing) {
+        self.base_uris.insert(base, listing);
     }
 
     /// Look up the listing for `base`.
-    fn get(&self, base: &BaseUri) -> Option<&Listing> {
-        self.0.get(base)
+    fn base_uri_get(&self, base: &BaseUri) -> Option<&BucketListing> {
+        self.base_uris.get(base)
     }
 }
 
@@ -125,7 +191,7 @@ impl DatumData {
 /// convenient format.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct InputFileData {
-    uri: String,
+    entry: BucketEntry,
     local_path: String,
 }
 
@@ -135,7 +201,7 @@ impl InputFileData {
         NewInputFile {
             job_id,
             datum_id,
-            uri: self.uri,
+            uri: self.entry.uri().to_owned(),
             local_path: self.local_path,
         }
     }
@@ -156,10 +222,22 @@ pub async fn input_to_datums(
     // The I/O phase: fetch the listings that the pure core needs. This also
     // verifies that every atom is listable _before_ spinning up a big cluster
     // job.
-    let listings = fetch_listings(secrets, input).await?;
+    let listings = Listings::fetch(secrets, input).await?;
 
     // The pure core: interpret the input algebra over those listings.
     let datum_datas = input_to_datums_pure(input, &listings)?;
+
+    // Check for name collisions. We did a version of this when reading
+    // individual buckets, but now we need to do it with the full set
+    // of paths. It's possible we want to check *more* edge cases than
+    // we do here.
+    let mut all_entries = vec![];
+    for d in &datum_datas {
+        for f in &d.input_files {
+            all_entries.push(f.entry.clone());
+        }
+    }
+    check_for_bucket_entry_collisions(&all_entries)?;
 
     let mut all_datums = vec![];
     let mut all_input_files = vec![];
@@ -172,47 +250,6 @@ pub async fn input_to_datums(
     Ok((all_datums, all_input_files))
 }
 
-/// (I/O phase.) Fetch one (non-recursive) listing per atom base URI in
-/// `input`.
-///
-/// We list even `Glob::WholeRepo` repos, because we want to verify that we can
-/// actually list the contents of a `Glob::WholeRepo` _before_ spinning up a
-/// big cluster job.
-#[instrument(skip_all, level = "trace")]
-async fn fetch_listings(secrets: &[Secret], input: &Input) -> Result<BaseUriListings> {
-    let base_uris = collect_atom_base_uris(input);
-    debug!(num_base_uris = %base_uris.len(), "fetching atom listings");
-    let mut listings = BaseUriListings::new();
-    for base in &base_uris {
-        let storage = <dyn CloudStorage>::for_uri(base.as_str(), secrets).await?;
-        listings.insert(
-            base.clone(),
-            storage.list_nonrecursive(base.as_str()).await?,
-        );
-    }
-    Ok(listings)
-}
-
-/// Collect the base URI of every atom in `input`, deduplicated.
-fn collect_atom_base_uris(input: &Input) -> BTreeSet<BaseUri> {
-    let mut base_uris = BTreeSet::new();
-    collect_atom_base_uris_helper(input, &mut base_uris);
-    base_uris
-}
-
-fn collect_atom_base_uris_helper(input: &Input, base_uris: &mut BTreeSet<BaseUri>) {
-    match input {
-        Input::Atom { uri, .. } => {
-            base_uris.insert(BaseUri::normalize(uri));
-        }
-        Input::Cross(inputs) | Input::Union(inputs) => {
-            for child in inputs {
-                collect_atom_base_uris_helper(child, base_uris);
-            }
-        }
-    }
-}
-
 /// (Pure core.) Interpret an `Input` into a sequence of [`DatumData`], given
 /// pre-fetched listings.
 ///
@@ -223,186 +260,98 @@ fn collect_atom_base_uris_helper(input: &Input, base_uris: &mut BTreeSet<BaseUri
 /// This is a pure, deterministic function of its two inputs. It fails if the
 /// input would produce rows that clash in the worker's local file system
 /// (see [`verify_local_paths`]).
-fn input_to_datums_pure(
-    input: &Input,
-    listings: &BaseUriListings,
-) -> Result<Vec<DatumData>> {
-    let datums = match input {
+fn input_to_datums_pure(input: &Input, listings: &Listings) -> Result<Vec<DatumData>> {
+    match input {
         Input::Atom { uri, repo, glob } => {
-            let base = BaseUri::normalize(uri);
-            // The I/O phase fetched a listing for every atom base, so this
-            // can only fail if `input_to_datums_pure` was called with an
-            // incomplete map (a programmer error).
-            let listing = listings.get(&base).expect(
-                "no listing for atom base; the I/O phase must list every atom base",
-            );
-            atom_to_datums_pure(&base, repo, *glob, listing)
+            atom_to_datums_pure(uri, repo, *glob, listings)
         }
         Input::Union(inputs) => {
-            // Merge all our inputs, in child order.
+            // Merge all our inputs, in child order. We only do this
+            // inline without a helper because it's the simplest case.
             let mut datums = vec![];
             for child in inputs {
                 datums.extend(input_to_datums_pure(child, listings)?);
             }
-            datums
+            Ok(datums)
         }
-        Input::Cross(inputs) => cross_to_datums_pure(inputs, listings)?,
-    };
-    verify_local_paths(&datums)?;
-    Ok(datums)
-}
-
-/// Verify that each datum's rows can coexist in a single local file system
-/// tree: no row may live at or under a path that another row of the same
-/// datum occupies as a file. For example, `/pfs/R/foo` as a file clashes
-/// with `/pfs/R/foo/` or `/pfs/R/foo/bar`, because the worker downloads all
-/// of a datum's rows into one clean `/pfs`, where a path cannot be both a
-/// file and a directory.
-///
-/// This checks the rows themselves; it cannot see inside the recursive
-/// download of a whole-repo row.
-fn verify_local_paths(datums: &[DatumData]) -> Result<()> {
-    for datum in datums {
-        let paths: BTreeSet<&str> = datum
-            .input_files
-            .iter()
-            .map(|f| f.local_path.as_str())
-            .collect();
-        for file in &paths {
-            if file.ends_with('/') {
-                continue;
-            }
-            // The rule: no other row may start with `file/`, because such a
-            // row would need `file` to be a directory. Paths sharing a
-            // prefix are contiguous in sorted order, so the smallest member
-            // >= `file/` starts with it if and only if any member does.
-            let prefix = format!("{file}/");
-            if let Some(under) = paths.range(prefix.as_str()..).next() {
-                if under.starts_with(prefix.as_str()) {
-                    return Err(format_err!(
-                        "datum rows {file} (a file) and {under} (under it) \
-                         would clash in the worker's local file system"
-                    ));
-                }
-            }
-        }
+        Input::Cross(inputs) => cross_to_datums_pure(inputs, listings),
     }
-    Ok(())
-}
-
-/// A top-level entry of a repository: a file or a directory.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Entry {
-    /// A file entry. `uri` does not end in `/`.
-    File { uri: String },
-    /// A directory entry. `uri` ends in `/`.
-    Dir { uri: String },
-}
-
-impl Entry {
-    fn uri(&self) -> &str {
-        match self {
-            Entry::File { uri } | Entry::Dir { uri } => uri,
-        }
-    }
-}
-
-/// Turn the raw non-recursive listing of `base` into its top-level entries.
-///
-/// `listing.files` are the file objects directly under `base`; the raw
-/// listing may include marker objects: a 0-byte `base/` for the base
-/// directory itself, and 0-byte `E/` objects for directories.
-/// `listing.dirs` are the subdirectories directly under `base`, each ending
-/// in `/`.
-///
-/// The base marker object is dropped. A directory marker object is a
-/// directory entry, winning the tie-break against its counterpart in
-/// `listing.dirs`; a marker object with no counterpart in `listing.dirs`
-/// names an _empty_ directory, which is still a directory entry.
-///
-/// Entries are returned in name order, files and directories interleaved.
-fn entries_from_listing(base: &BaseUri, listing: &Listing) -> Vec<Entry> {
-    let mut emitted_dirs: BTreeSet<&str> = BTreeSet::new();
-    let mut entries: Vec<Entry> =
-        Vec::with_capacity(listing.files.len() + listing.dirs.len());
-    for uri in &listing.files {
-        if uri.as_str() == base.as_str() {
-            // The base marker object: not an entry.
-            continue;
-        }
-        if uri.ends_with('/') {
-            // A directory marker object: a directory, possibly empty.
-            if emitted_dirs.insert(uri.as_str()) {
-                entries.push(Entry::Dir { uri: uri.clone() });
-            }
-        } else {
-            entries.push(Entry::File { uri: uri.clone() });
-        }
-    }
-    for uri in &listing.dirs {
-        // Skip directories already emitted from their marker object.
-        if emitted_dirs.insert(uri.as_str()) {
-            entries.push(Entry::Dir { uri: uri.clone() });
-        }
-    }
-    entries.sort_by(|entry1, entry2| entry1.uri().cmp(entry2.uri()));
-    entries
 }
 
 /// Interpret a single `Input::Atom` into a list of datums, given the
 /// (non-recursive) listing of its base URI.
 fn atom_to_datums_pure(
-    base: &BaseUri,
+    uri: &str,
     repo: &str,
     glob: Glob,
-    listing: &Listing,
-) -> Vec<DatumData> {
+    listings: &Listings,
+) -> Result<Vec<DatumData>> {
+    let base = BaseUri::normalize(uri);
     match glob {
-        // Our input file is just the entire repo, as a directory.
-        Glob::WholeRepo => vec![DatumData {
-            name: DatumName(vec![Slot {
-                repo: repo.to_owned(),
-                binding: None,
-            }]),
-            input_files: vec![InputFileData {
-                uri: base.as_str().to_owned(),
-                local_path: format!("/pfs/{}/", repo),
-            }],
-        }],
-
-        // One datum per top-level entry (file or directory), in name order.
-        // File entries land at `/pfs/R/E`; directory entries land at
-        // `/pfs/R/E/` (trailing slash), which the worker syncs recursively.
-        // The datum's name binds the repo to the entry `E`.
+        Glob::WholeRepo => glob_whole_repo(&base, repo),
         Glob::TopLevelDirectoryEntries => {
-            let base_len = base.as_str().len();
-            entries_from_listing(base, listing)
-                .into_iter()
-                .map(|entry| {
-                    // The entry name `E` (without any trailing slash) is the
-                    // datum's star binding.
-                    let binding = match &entry {
-                        Entry::File { uri } => uri[base_len..].to_owned(),
-                        Entry::Dir { uri } => uri[base_len..uri.len() - 1].to_owned(),
-                    };
-                    // Listing entries are under `base` (with a non-empty
-                    // base-relative portion) by construction.
-                    let local_path = uri_to_local_path(base, entry.uri(), repo)
-                        .expect("a listing entry should be under its base URI");
-                    DatumData {
-                        name: DatumName(vec![Slot {
-                            repo: repo.to_owned(),
-                            binding: Some(binding),
-                        }]),
-                        input_files: vec![InputFileData {
-                            uri: entry.uri().to_owned(),
-                            local_path,
-                        }],
-                    }
-                })
-                .collect()
+            glob_top_level_directory_entries(&base, repo, listings)
         }
     }
+}
+
+/// Handle [`Glob::WholeRepo`]. This is simple, because we don't need to inspect
+/// what's in it. Our input file is just the entire repo, as a directory.
+fn glob_whole_repo(base: &BaseUri, repo: &str) -> Result<Vec<DatumData>> {
+    Ok(vec![DatumData {
+        name: DatumName(vec![Slot {
+            repo: repo.to_owned(),
+            binding: None,
+        }]),
+        input_files: vec![InputFileData {
+            entry: BucketEntry::Prefix(BucketPrefix::from_uri(
+                base.as_str().to_owned(),
+            )?),
+            local_path: format!("/pfs/{}/", repo),
+        }],
+    }])
+}
+
+/// Handle [`Glob::TopLevelDirectoryEntries`]. One datum per top-level entry
+/// (file or directory), in the order the listing provides them. File entries
+/// map to `/pfs/R/E`; directory entries map to `/pfs/R/E/` (trailing slash),
+/// which the worker syncs recursively. The datum's name binds the repo to the
+/// entry `E`.
+fn glob_top_level_directory_entries(
+    base: &BaseUri,
+    repo: &str,
+    listings: &Listings,
+) -> Result<Vec<DatumData>> {
+    // The I/O phase fetched a listing for every atom base, so this
+    // can only fail if `input_to_datums_pure` was called with an
+    // incomplete map (a programmer error).
+    let listing = listings
+        .base_uri_get(base)
+        .expect("no listing for atom base; the I/O phase must list every atom base");
+
+    let mut datums = vec![];
+    if let BucketListing::PrefixEntries(entries) = listing {
+        for entry in entries {
+            // Figure out the name of our datum by stripping the base
+            // URI and any trailing slash, giving us just the part that
+            // matches the "*" in "/*".
+            let binding =
+                base.strip_from(entry.uri().strip_suffix("/").unwrap_or(entry.uri()))?;
+            // Get the local "/pfs" version of the path.
+            let local_path = uri_to_local_path(base, entry.uri(), repo)?;
+            datums.push(DatumData {
+                name: DatumName(vec![Slot {
+                    repo: repo.to_owned(),
+                    binding: Some(binding.to_owned()),
+                }]),
+                input_files: vec![InputFileData {
+                    entry: entry.to_owned(),
+                    local_path,
+                }],
+            });
+        }
+    }
+    Ok(datums)
 }
 
 /// Interpret a cross product into a list of datums.
@@ -413,7 +362,7 @@ fn atom_to_datums_pure(
 /// since our input comes from a local user, this is fine for now.
 fn cross_to_datums_pure(
     inputs: &[Input],
-    listings: &BaseUriListings,
+    listings: &Listings,
 ) -> Result<Vec<DatumData>> {
     match inputs.len() {
         // Base cases.
@@ -476,6 +425,7 @@ fn uri_to_local_path(base: &BaseUri, uri: &str, repo: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use falconeri_common::storage::BucketObject;
     use proptest::prelude::*;
 
     // ---- Test helpers -------------------------------------------------------
@@ -498,15 +448,25 @@ mod tests {
     }
 
     /// Build a `BaseUriListings` from `(base, files, dirs)` triples.
-    fn listing_map(pairs: &[(&str, &[&str], &[&str])]) -> BaseUriListings {
-        let mut listings = BaseUriListings::new();
+    fn base_uri_listings(pairs: &[(&str, &[&str], &[&str])]) -> Listings {
+        let mut listings = Listings::default();
         for &(base, files, dirs) in pairs {
-            listings.insert(
+            let mut entries = files
+                .iter()
+                .map(|&f| BucketEntry::Object(BucketObject::from_uri_for_test(f, 0)))
+                .collect::<Vec<_>>();
+            entries.extend(
+                dirs.iter()
+                    .map(|&d| {
+                        Ok(BucketEntry::Prefix(BucketPrefix::from_uri(d.to_owned())?))
+                    })
+                    .collect::<Result<Vec<_>>>()
+                    .expect("invalid bucket prefix"),
+            );
+            listings.base_uri_insert(
                 BaseUri::normalize(base),
-                Listing {
-                    files: files.iter().map(|s| s.to_string()).collect(),
-                    dirs: dirs.iter().map(|s| s.to_string()).collect(),
-                },
+                BucketListing::prefix_entries(entries)
+                    .expect("invalid bucket entries"),
             );
         }
         listings
@@ -527,11 +487,26 @@ mod tests {
             input_files: files
                 .iter()
                 .map(|&(uri, local_path)| InputFileData {
-                    uri: uri.to_owned(),
+                    entry: if uri.ends_with('/') {
+                        BucketEntry::Prefix(
+                            BucketPrefix::from_uri(uri.to_owned())
+                                .expect("invalid bucket prefix"),
+                        )
+                    } else {
+                        BucketEntry::Object(BucketObject::from_uri_for_test(uri, 0))
+                    },
                     local_path: local_path.to_owned(),
                 })
                 .collect(),
         }
+    }
+
+    /// Sort a datum sequence, to compare "up to permutation" (datum order
+    /// is an implementation detail).
+    fn canonical(datums: Vec<DatumData>) -> Vec<DatumData> {
+        let mut v = datums;
+        v.sort();
+        v
     }
 
     // ---- Pinned current behavior (unit tests) --------------------------------
@@ -548,7 +523,7 @@ mod tests {
     #[test]
     fn whole_repo_row_shape() {
         let input = atom("gs://b/data/", "r", Glob::WholeRepo);
-        let map = listing_map(&[("gs://b/data/", &["gs://b/data/a.txt"], &[])]);
+        let map = base_uri_listings(&[("gs://b/data/", &["gs://b/data/a.txt"], &[])]);
         assert_eq!(
             input_to_datums_pure(&input, &map).unwrap(),
             vec![datum(&[("r", None)], &[("gs://b/data/", "/pfs/r/")])]
@@ -556,13 +531,9 @@ mod tests {
     }
 
     /// `"/*"` produces one datum per _top-level entry_ (file or directory),
-    /// in name order, nested objects excluded (the listing is
-    /// non-recursive).
-    ///
-    /// The listing here exercises the marker rules end to end: the base
-    /// marker object (`gs://b/data/`) is dropped, and the directory marker
-    /// object (`gs://b/data/alpha/`, also a common prefix) yields a single
-    /// directory entry.
+    /// nested objects excluded (the listing is non-recursive). Compared up
+    /// to permutation: the order of the datums follows the object store's
+    /// listing order, which is an implementation detail.
     ///
     /// Note the trailing-slash conventions pinned here: a file URI has no
     /// trailing slash, and a directory URI keeps it, in both `uri` and
@@ -570,18 +541,14 @@ mod tests {
     #[test]
     fn star_is_per_entry() {
         let input = atom("gs://b/data/", "r", Glob::TopLevelDirectoryEntries);
-        let map = listing_map(&[(
+        let map = base_uri_listings(&[(
             "gs://b/data/",
-            &[
-                "gs://b/data/",
-                "gs://b/data/alpha/",
-                "gs://b/data/notes.txt",
-            ],
+            &["gs://b/data/notes.txt"],
             &["gs://b/data/alpha/"],
         )]);
         assert_eq!(
-            input_to_datums_pure(&input, &map).unwrap(),
-            vec![
+            canonical(input_to_datums_pure(&input, &map).unwrap()),
+            canonical(vec![
                 datum(
                     &[("r", Some("alpha"))],
                     &[("gs://b/data/alpha/", "/pfs/r/alpha/")]
@@ -590,41 +557,7 @@ mod tests {
                     &[("r", Some("notes.txt"))],
                     &[("gs://b/data/notes.txt", "/pfs/r/notes.txt")]
                 ),
-            ]
-        );
-    }
-
-    /// Marker handling in [`entries_from_listing`]: the base marker object
-    /// is dropped; a directory marker object that is also in `listing.dirs`
-    /// yields a single directory entry (the directory wins the tie-break);
-    /// a directory marker object with _no_ counterpart in `listing.dirs`
-    /// names an empty directory and is still a directory entry. The result
-    /// is in name order, files and directories interleaved.
-    #[test]
-    fn entries_from_listing_marker_rules() {
-        let base = BaseUri::normalize("gs://b/data/");
-        let listing = Listing {
-            files: vec![
-                "gs://b/data/".to_owned(),       // base marker: dropped
-                "gs://b/data/alpha/".to_owned(), // marker + dir entry: one dir
-                "gs://b/data/empty/".to_owned(), // marker only: empty dir
-                "gs://b/data/notes.txt".to_owned(),
-            ],
-            dirs: vec!["gs://b/data/alpha/".to_owned()],
-        };
-        assert_eq!(
-            entries_from_listing(&base, &listing),
-            vec![
-                Entry::Dir {
-                    uri: "gs://b/data/alpha/".to_owned(),
-                },
-                Entry::Dir {
-                    uri: "gs://b/data/empty/".to_owned(),
-                },
-                Entry::File {
-                    uri: "gs://b/data/notes.txt".to_owned(),
-                },
-            ]
+            ])
         );
     }
 
@@ -634,7 +567,7 @@ mod tests {
     /// failed in [`uri_to_local_path`].
     #[test]
     fn atom_uri_without_trailing_slash_is_normalized() {
-        let map = listing_map(&[("gs://b/data/", &["gs://b/data/a.txt"], &[])]);
+        let map = base_uri_listings(&[("gs://b/data/", &["gs://b/data/a.txt"], &[])]);
 
         let input = atom("gs://b/data", "r", Glob::TopLevelDirectoryEntries);
         assert_eq!(
@@ -653,10 +586,13 @@ mod tests {
         );
     }
 
-    /// `Union` concatenates its children's datums, in child order.
+    /// `Union` contains exactly the union of its children's datums, and
+    /// nothing else. Compared up to permutation: datum order is an
+    /// implementation detail (datum IDs are random UUIDs, and neither
+    /// reservation nor display depends on insertion order).
     #[test]
-    fn union_concatenates_in_child_order() {
-        let map = listing_map(&[
+    fn union_contains_exactly_the_childrens_datums() {
+        let map = base_uri_listings(&[
             ("gs://b/a/", &["gs://b/a/x.txt"], &[]),
             ("gs://b/b/", &[], &[]),
         ]);
@@ -665,23 +601,25 @@ mod tests {
             atom("gs://b/b/", "rb", Glob::WholeRepo),
         ]);
         assert_eq!(
-            input_to_datums_pure(&input, &map).unwrap(),
-            vec![
+            canonical(input_to_datums_pure(&input, &map).unwrap()),
+            canonical(vec![
                 datum(
                     &[("ra", Some("x.txt"))],
                     &[("gs://b/a/x.txt", "/pfs/ra/x.txt")]
                 ),
                 datum(&[("rb", None)], &[("gs://b/b/", "/pfs/rb/")]),
-            ]
+            ])
         );
     }
 
     /// `Cross` builds nested loops, left to right: for each datum of the
     /// first input, for each datum of the second, one combined datum whose
-    /// name slots and files are concatenated in the same order.
+    /// name slots and files are concatenated in the same order. Compared up
+    /// to permutation: the order of the combined datums follows the
+    /// children's listing order, which is an implementation detail.
     #[test]
     fn cross_nests_left_to_right() {
-        let map = listing_map(&[
+        let map = base_uri_listings(&[
             ("gs://b/a/", &["gs://b/a/1.txt", "gs://b/a/2.txt"], &[]),
             ("gs://b/b/", &["gs://b/b/1.txt", "gs://b/b/2.txt"], &[]),
         ]);
@@ -690,8 +628,8 @@ mod tests {
             atom("gs://b/b/", "rb", Glob::TopLevelDirectoryEntries),
         ]);
         assert_eq!(
-            input_to_datums_pure(&input, &map).unwrap(),
-            vec![
+            canonical(input_to_datums_pure(&input, &map).unwrap()),
+            canonical(vec![
                 datum(
                     &[("ra", Some("1.txt")), ("rb", Some("1.txt"))],
                     &[
@@ -720,7 +658,7 @@ mod tests {
                         ("gs://b/b/2.txt", "/pfs/rb/2.txt"),
                     ]
                 ),
-            ]
+            ])
         );
     }
 
@@ -730,54 +668,18 @@ mod tests {
     #[test]
     fn cross_of_zero_inputs_is_zero_datums() {
         let datums =
-            input_to_datums_pure(&cross(vec![]), &BaseUriListings::new()).unwrap();
+            input_to_datums_pure(&cross(vec![]), &Listings::default()).unwrap();
         assert!(datums.is_empty());
     }
 
     /// `Cross` of a single input is that input.
     #[test]
     fn cross_of_one_input_is_identity() {
-        let map = listing_map(&[("gs://b/a/", &["gs://b/a/x.txt"], &[])]);
+        let map = base_uri_listings(&[("gs://b/a/", &["gs://b/a/x.txt"], &[])]);
         let input = atom("gs://b/a/", "ra", Glob::TopLevelDirectoryEntries);
         assert_eq!(
             input_to_datums_pure(&cross(vec![input.clone()]), &map).unwrap(),
             input_to_datums_pure(&input, &map).unwrap()
-        );
-    }
-
-    /// A datum whose rows would clash in the worker's local file system is
-    /// rejected. The bucket contains both a file `foo` and a file `foo/bar`,
-    /// so the top-level entries include a file `foo` and a directory `foo/`,
-    /// and `Cross` combines both into a single datum, where `/pfs/ra/foo`
-    /// would have to be both a file and a directory.
-    #[test]
-    fn clashing_local_paths_are_rejected() {
-        let map = listing_map(&[("gs://b/a/", &["gs://b/a/foo"], &["gs://b/a/foo/"])]);
-        let input = atom("gs://b/a/", "ra", Glob::TopLevelDirectoryEntries);
-        assert!(
-            input_to_datums_pure(&cross(vec![input.clone(), input]), &map).is_err()
-        );
-    }
-
-    /// The I/O phase's base collection dedupes and normalizes: an atom URI
-    /// without a trailing slash is the same base as one with it, and repeated
-    /// base URIs are listed only once.
-    #[test]
-    fn collect_atom_base_uris_dedupes_and_normalizes() {
-        let input = cross(vec![
-            atom("gs://b/data", "r1", Glob::WholeRepo),
-            union(vec![
-                atom("gs://b/data/", "r2", Glob::TopLevelDirectoryEntries),
-                atom("gs://b/other/", "r3", Glob::WholeRepo),
-            ]),
-        ]);
-        let base_uris = collect_atom_base_uris(&input);
-        assert_eq!(
-            base_uris,
-            ["gs://b/data/", "gs://b/other/"]
-                .iter()
-                .map(|uri| BaseUri::normalize(uri))
-                .collect::<BTreeSet<BaseUri>>()
         );
     }
 
@@ -820,37 +722,41 @@ mod tests {
     /// Candidate top-level directory names (base-relative).
     const REL_DIRS: &[&str] = &["d1"];
 
-    /// A synthetic non-recursive listing of `base`: a small subset of the
-    /// candidate files and directories, plus the marker objects (the base
-    /// marker, and each selected directory's marker) to exercise the drop
-    /// and tie-break rules.
-    fn gen_listing(base: &'static str) -> impl Strategy<Value = Listing> {
+    /// A synthetic non-recursive listing of `base`: a random subset of the
+    /// candidate files and directories.
+    fn gen_listing(base: &'static str) -> impl Strategy<Value = BucketListing> {
         let files: Vec<String> =
             REL_FILES.iter().map(|p| format!("{base}{p}")).collect();
         let dirs: Vec<String> =
             REL_DIRS.iter().map(|p| format!("{base}{p}/")).collect();
         (
-            prop::sample::subsequence(files, 0..=2),
-            prop::sample::subsequence(dirs, 0..=1),
+            prop::sample::subsequence(files, 0..=REL_FILES.len()),
+            prop::sample::subsequence(dirs, 0..=REL_DIRS.len()),
         )
             .prop_map(move |(files, dirs)| {
-                let mut all_files = files;
-                all_files.push(base.to_owned());
-                all_files.extend(dirs.iter().cloned());
-                Listing {
-                    files: all_files,
-                    dirs,
-                }
+                let mut entries = files
+                    .iter()
+                    .map(|p| {
+                        BucketEntry::Object(BucketObject::from_uri_for_test(p, 0))
+                    })
+                    .collect::<Vec<_>>();
+                entries.extend(dirs.iter().map(|p| {
+                    BucketEntry::Prefix(
+                        BucketPrefix::from_uri(p.to_owned())
+                            .expect("invalid bucket prefix"),
+                    )
+                }));
+                BucketListing::prefix_entries(entries).expect("invalid bucket entries")
             })
     }
 
     /// A synthetic listing map: both base URIs, each with possibly-empty
     /// listings.
-    fn gen_listing_map() -> impl Strategy<Value = BaseUriListings> {
+    fn gen_listing_map() -> impl Strategy<Value = Listings> {
         (gen_listing("gs://b/ra/"), gen_listing("gs://b/rb/")).prop_map(|(ra, rb)| {
-            let mut listings = BaseUriListings::new();
-            listings.insert(BaseUri::normalize("gs://b/ra/"), ra);
-            listings.insert(BaseUri::normalize("gs://b/rb/"), rb);
+            let mut listings = Listings::default();
+            listings.base_uri_insert(BaseUri::normalize("gs://b/ra/"), ra);
+            listings.base_uri_insert(BaseUri::normalize("gs://b/rb/"), rb);
             listings
         })
     }
@@ -885,27 +791,19 @@ mod tests {
         prop_oneof![
             3 => gen_atom().boxed(),
             2 => prop::collection::vec(gen_input(depth - 1), 1..=2)
-                .prop_map(|inputs| union(inputs))
+                .prop_map(union)
                 .boxed(),
             2 => prop::collection::vec(gen_input(depth - 1), 1..=2)
-                .prop_map(|inputs| cross(inputs))
+                .prop_map(cross)
                 .boxed(),
         ]
         .boxed()
     }
 
-    /// Sort a datum sequence, to compare "up to permutation" (loop order is
-    /// an implementation detail).
-    fn canonical(datums: Vec<DatumData>) -> Vec<DatumData> {
-        let mut v = datums;
-        v.sort();
-        v
-    }
-
     /// Run the pure core. The generators cannot produce clashing local paths
     /// (no candidate name is both a file and a directory), so this cannot
     /// fail.
-    fn expand_ok(input: &Input, listings: &BaseUriListings) -> Vec<DatumData> {
+    fn expand_ok(input: &Input, listings: &Listings) -> Vec<DatumData> {
         input_to_datums_pure(input, listings)
             .expect("the generators cannot produce clashing local paths")
     }
