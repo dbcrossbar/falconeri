@@ -10,6 +10,14 @@ storage probe API was reworked before landing (`list_one_entry` /
 `list_subpath_entries` supersede the 2026-09-03 `list_prefix` sketch), and
 the proptest harness landed against real storage code; the C3 notes are
 superseded wherever they conflict — see the "Revised 2026-09-25" notes.
+**Revised 2026-09-26 (C4 planning):** the C4 section was rewritten against
+the landed code and harness. C4 has **not** landed; its earlier "Amended
+(C4 landed)" notes were stale and have been folded into the C4 section or
+dropped, and its still-live decisions are labeled "Decided (C4 planning)".
+**Revised 2026-09-26 (laws):** all laws are now stated uniformly *up to
+permutation* — neither datum order nor file order within a datum is
+semantic (no downstream consumer observes either); determinism remains a
+tested implementation property. See §3.3.
 
 ## 1. Goal
 
@@ -116,8 +124,13 @@ its own `/pfs/<repo>/` tree.
 - A **datum name** is a tuple of slots.
 - A **file** is a pair `(uri, local_path)`.
 - A **datum** is a pair `(name, files)`, where `files` is a sequence of files.
-- An `Input` denotes a **sequence of datums** (order = deterministic
-  expansion order; not part of the semantics except via the laws below).
+- An `Input` denotes a **sequence of datums**. Sequence order is *not*
+  part of the semantics: datum order has no downstream consumer (it is
+  not persisted; reservation is unordered), and file order within a datum
+  is likewise unconstrained. All laws are stated up to permutation (§3.3).
+  Determinism — same input, identical output, order included — remains a
+  tested property of the implementation, because reproducibility catches
+  real bugs (e.g., hash-iteration order leaking into the output).
 
 ### 3.2 Interpretation
 
@@ -132,7 +145,7 @@ implementation plan, C2.)
 | `Atom(R, base, "/*/p")` | `[( (R, E), [(u_{E/p}, /pfs/R/E/p)] )]` for each entry `E` of `L(base)` with `E/p` existing |
 | `Union([A₁ … Aₙ])` | sequence concatenation of the children |
 | `Cross([A₁ … Aₙ])` | all pairings: names are slot-tuple concatenations, files are concatenations (nested loops, left to right) |
-| `Group([A₁ … Aₙ])` | group-by on the concatenated children's sequence: one datum per distinct name, in first-appearance order, with files concatenated in encounter order |
+| `Group([A₁ … Aₙ])` | group-by on the concatenated children's sequence: one datum per distinct name, with all matching files (the concrete expansion uses first-appearance and encounter order — incidental, §3.3) |
 
 Two design invariants:
 
@@ -147,19 +160,28 @@ Two design invariants:
 
 ### 3.3 Properties
 
-All laws are stated about the denotations above. "Exact" means equality as
-sequences; "up to permutation" means equality once the order of the datum
-sequence is ignored (loop order is an implementation detail).
+All laws are stated about the denotations above and hold **up to
+permutation**: equality of datum sequences ignoring datum order, and
+equality of datums ignoring file order within each datum.
 
-| # | Property | Status |
-|---|---|---|
-| P1 | **Group is idempotent**: `G(G(X)) = G(X)`. After the first pass, names are unique. | exact |
-| P2 | **Group is bracket-invariant**: `G([A, B, C]) = G([G([A, B]), C])`. `G` depends only on the flat concatenation of its children's sequences. | exact |
-| P3 | **Union is a special case of Group**: if no name appears in two different children, `G([A, B]) = U([A, B])`. | exact |
-| P4 | **Cross distributes over Union**: `C(A, U(B, C)) ≃ U(C(A, B), C(A, C))`. | up to permutation |
-| P5 | **Union is commutative and associative.** | up to permutation |
-| P6 | **Subpath refines star**: for the same repo/URI, every name of `/*/p` appears in `/*` (with the same binding). | exact |
-| P7 | **Name ⇒ footprint** (soundness): equal names write to the same `/pfs` locations, so group-merged datums are footprint-compatible by construction. Tested as root membership (every file of a datum lives under a `/pfs/<repo>/` root named by one of its slots); the stronger "equal names ⇒ identical rows" is refuted by distinct globs sharing a binding — e.g. the union of `/*` and `/*/p` over one base yields name `(R, E)` with different rows (C3; wording revised 2026-09-25, the earlier "file-plus-directory duality" example did not land). | exact (structural) |
+**Restated 2026-09-26:** P1–P3 were previously stated as *exact* sequence
+equalities, which committed the API to first-appearance ordering even
+though nothing downstream observes datum order — an ordering commitment in
+search of a purpose. Uniform permutation-tolerance states what we actually
+care about and frees the implementation (e.g., a future parallel merge).
+The implementation still produces deterministic first-appearance /
+encounter order, which the `determinism` proptest pins; the two-sided
+laws compare canonically (datums and rows sorted).
+
+| # | Property |
+|---|---|
+| P1 | **Group is idempotent**: `G(G(X)) = G(X)`. After the first pass, names are unique. |
+| P2 | **Group is bracket-invariant**: `G([A, B, C]) = G([G([A, B]), C])`. `G` depends only on the flat concatenation of its children's sequences. |
+| P3 | **Union is a special case of Group**: if every name in the concatenation of the children's sequences is pairwise distinct — no duplicates across children *or within one child* — then `G([A, B]) = U([A, B])`. (Premise strengthened 2026-09-26: the original "no name appears in two different children" was too weak — `G` also merges a child's own internal duplicates, e.g. a union of two same-repo `"/"` atoms, while `U` never merges. Found by proptest.) |
+| P4 | **Cross distributes over Union**: `C(A, U(B, C)) ≃ U(C(A, B), C(A, C))`. |
+| P5 | **Union is commutative and associative.** |
+| P6 | **Subpath refines star**: for the same repo/URI, every name of `/*/p` appears in `/*` (with the same binding). |
+| P7 | **Name ⇒ footprint** (soundness): equal names write to the same `/pfs` locations, so group-merged datums are footprint-compatible by construction. Tested as root membership (every file of a datum lives under a `/pfs/<repo>/` root named by one of its slots); the stronger "equal names ⇒ identical rows" is refuted by distinct globs sharing a binding — e.g. the union of `/*` and `/*/p` over one base yields name `(R, E)` with different rows (C3; wording revised 2026-09-25, the earlier "file-plus-directory duality" example did not land). |
 
 **Known non-law.** Cross does *not* distribute over Group:
 
@@ -167,20 +189,32 @@ sequence is ignored (loop order is an implementation detail).
 C(A, G(B, C))  ≠  G(C(A, B), C(A, C))
 ```
 
-whenever a binding of `B` equals a binding of `C`. In the right-hand side,
-`A`'s files are contributed once *per cross child* that feeds the merged
-datum, so they appear twice (identical `uri`/`local_path` rows). Concretely,
-with `A = {repo a, "/*"}`, `B = {repo b, "/*"}`, `C = {repo c, "/*"}` and a
-common entry `x`:
+whenever some datum name is produced by *both* `B` and `C` — e.g., the group
+idiom, the same repo name declared over two bases, with a common entry. In
+the right-hand side, `A`'s files are contributed once *per cross child* that
+feeds the merged datum, so they appear twice (identical `uri`/`local_path`
+rows). Concretely, with `A = {repo a, base U_a, "/*"}`, `B = {repo r, base
+U_1, "/*"}`, `C = {repo r, base U_2, "/*"}` — `B` and `C` declare the same
+repo name over two bases — and a common file entry `x` in all three:
 
-- LHS datum `(a,x),(b,x),(c,x)`: files of `a/x`, then `b/x`, then `c/x`.
-- RHS: same datum, but `a/x`'s files appear twice — once after `b/x`, once
-  after `c/x`.
+- LHS: `G(B, C)` merges `B`'s and `C`'s datums `(r, x)` into one, with files
+  `U_1/x`, `U_2/x`; crossing with `A` gives the datum `((a,x),(r,x))` with
+  files `U_a/x`, `U_1/x`, `U_2/x`.
+- RHS: `C(A, B)` gives `((a,x),(r,x))` with files `U_a/x`, `U_1/x`, and
+  `C(A, C)` the same name with files `U_a/x`, `U_2/x`; `G` merges them into
+  `U_a/x`, `U_1/x`, `U_a/x`, `U_2/x` — `A`'s files appear twice.
 
 This is a consequence of the intended semantics ("each child of `group`
 contributes its datums wholesale"), not a defect. It holds as an equality at
-the "set of files per name" level, after duplicate removal. It should be
-pinned down as documented behavior in the test suite.
+the "set of files per name" level, after duplicate removal — a mathematical
+footnote only: the duplicated row makes the RHS a clobber/duplicate-entry
+error at `input_to_datums` (see §5.1(3)), so that spec never actually runs.
+C4 pins the denotation difference as a pure-core unit test, with a note on
+the runtime rejection. (The difference is in row *multiplicity* — `U_a/x`
+appearing twice — so it is visible up to permutation, like everything
+else.) **Decided (C4 planning):** an earlier draft of this
+example gave `B` and `C` distinct repo names; with distinct repo names the
+two sides never merge and the equation holds, so that example was wrong.
 
 ## 4. Type declarations
 
@@ -295,6 +329,12 @@ cross slot), and `local_path` already embeds it.
    `{repo b, "/*"}` in one group do not merge — no error, no multi-`/pfs`-tree
    datum. Predictable, but a user who expected merging will see "nothing
    happened". Candidate for a warning or spec-level validation later.
+   **Decided (C4 planning):** no user-facing diagnostic for now — the CLI
+   has no reliable info channel (open question 4); a group which merges no
+   datums is logged at `debug!`. Revisit. (The deferred `group_key`
+   sketch gives this case its real fix: it turns "nothing happened" into
+   an expressible diagonal join, and would let any future diagnostic
+   suggest "did you mean a shared `group_key`?")
 3. **Clobber hazard.** Two children with equal names whose files resolve to
    the *same* `local_path` but different `uri`s (e.g. `"/*"` from `U1` and
    `"/*"` from `U2`, same repo name) make the worker download both to one
@@ -305,6 +345,9 @@ cross slot), and `local_path` already embeds it.
    directory across children — that is the point of the merge (see the §2
    example) — so the check must apply only to file paths (no trailing
    slash).
+   **Decided (C4 planning):** the check is per-datum and general, not
+   `group`-scoped: a `cross` of two same-repo atoms over distinct bases can
+   clobber the same way, and failing there is the right answer too.
 4. **Whole-repo is no longer the cross-unit of names** (it contributes
    `(R, None)`, not nothing). Cosmetic; every load-bearing law survives.
 5. **Pre-existing quirk, untouched:** `Cross([])` yields zero datums, where
@@ -334,7 +377,10 @@ cross slot), and `local_path` already embeds it.
    `list`.)
 3. **Persist the datum name?** A `names` column on `datums` would make
    `job describe`/debugging much easier (names are currently dropped at the
-   DB boundary). A schema change; probably later.
+   DB boundary). A schema change; probably later. If the deferred
+   `group_key` lands, slots should persist `group_key` *and* `repo`:
+   with the two decoupled, the name alone no longer addresses the
+   footprint, and debugging wants both.
 4. **Validation policy.** How much of §5.1(2)–(3) do we check at `job run`
    time (spec-level errors/warnings) versus leaving to the worker? Two
    refinements settled during planning: the clobber check (§5.1(3)) applies to
@@ -343,6 +389,17 @@ cross slot), and `local_path` already embeds it.
    message so it is discoverable rather than magical.
    - We will probably want to catch as much up front as we can, before we start
      spinning up worker nodes.
+   - **Decided (C4 planning):** the clobber check (§5.1(3)) runs at `job
+     run` time, server-side, as a per-datum pass in `input_to_datums`
+     beside `check_datum_collisions` (outside the pure core) — before any
+     worker exists — as a hard error, the one channel the CLI reliably
+     surfaces. The spec-time *info* message for the idiom is
+     dropped: the CLI has no info channel (stdout is the job name; tracing
+     is `RUST_LOG`-gated, defaulting to error), so the idiom is documented
+     in the guide instead, and a zero-merge group logs at `debug!`. The
+     diagnostic question for §5.1(2) stays open; note the deferred
+     `group_key` sketch changes what a good answer looks like (suggesting
+     the shared-key join rather than merely flagging the no-op).
 5. **Empty `Group` / empty `Union`.** Both should yield zero datums,
    consistently with `Cross([])`; just confirming the convention.
 
@@ -535,36 +592,112 @@ test) green, and includes its own tests. This revision of the plan is patch
     reach of `InMemory` and stays pinned by unit-level collision tests.
 - Guide: document `"/*/path"`.
 
-**C4 — `Input::Group`.**
+**C4 — `Input::Group`.** *(Rewritten 2026-09-26 against the landed C1–C3
+code; the stale "C4 landed" notes this replaces are recovered in git
+history if ever needed.)*
 
-- `pipeline.rs`: `Group(Vec<Input>)` variant (snake_case `"group"`,
-  `no_recursion` schema).
-- Pure-core arm: group-by on `DatumName` over the concatenated children,
-  first-appearance order, files concatenated in child order.
-- Tests: unit (two base URIs sharing a repo name merge into one
-  `/pfs/R/<binding>/` directory; distinct repo names are a no-op), proptest
-  P1, P2, P3, and the §3.3 non-law pinned as documented behavior.
-  **Note 2026-09-25:** the proptest rig now exists (see the C3 test
-  revision): P1–P3 can reuse `input_and_entries()` + the shared-listings
-  harness. Shared repo names arise naturally from the `r[123]` alphabet;
-  cross-fragment bucket sharing is reachable via the small pool but random,
-  so add a knob to force same-bucket fragments if coverage turns out thin.
-- Design notes to land with this chunk:
-  - A migration note for users coming from Pachyderm's `group` input:
-    falconeri's merge key is the datum name (repo + star binding), not a
-    `groupBy` pattern, and the merged datum materializes as a single
-    `/pfs/<repo>/<binding>/` directory rather than per-repo `/pfs` trees.
-    Merging across distinct base URIs therefore requires declaring the same
-    repo name over those URIs.
-  - The spec-time *info* message for that idiom (open question 4).
-  - The clobber validation of §5.1(3), file paths only.
+- `pipeline.rs`: `Group(Vec<Input>)` variant (`snake_case` derives
+  `"group"`; `#[schema(no_recursion)]` like `Cross`/`Union`). Add a `Group`
+  arm to `Arbitrary for Input`; the existing round-trip and
+  schema-validation proptests then cover serde for free.
+- `Listings::fetch_helper`: recurse through `Group` like `Cross`/`Union`
+  (`group` regroups, never adds atoms — no new fetching).
+- Pure-core arm in `input_to_datums_pure`: group-by on `DatumName` over
+  the concatenated children — one datum per distinct name, first-appearance
+  order, files concatenated in child order. `DatumName` already derives
+  `Eq + Hash`. No new error path: the pure core must keep its invariant of
+  never rejecting generated input (collision and clobber checks live
+  outside it).
+- Clobber validation (§5.1(3)), folded into `check_datum_collisions` as a
+  second per-datum pass (first pass: bucket-entry URIs; second: file rows
+  keyed by `local_path`) — **not** in the pure core,
+  where the law harness's generators produce clobbers routinely. Within one
+  datum, no two *file* rows (no trailing slash) may share a `local_path`
+  with different `uris`; directory rows sharing a `local_path` are legal —
+  merging trees is the point. General, not `group`-scoped (same-repo
+  `cross`es fail the same check; that is intended). Documented blind spot:
+  two files of the same name *inside* two merged directory rows still
+  clobber silently, exactly as with whole-repo rows.
+- Tests, on the landed harness (see the C3 "Revised 2026-09-25" notes):
+  - Unit pins: two base URIs sharing a repo name merge into one datum
+    holding both rows; distinct repo names are a no-op (no merge);
+    first-appearance order and child-order file concatenation;
+    `Group([])` → zero datums (open question 5); the §3.3 non-law pinned
+    at the pure-core level (RHS shows the duplicated `A` row — note in the
+    test that such a spec is rejected at runtime by the checks above).
+    While touching C4, also add the `Glob::Subpath` row-shape pins C3
+    noted as missing.
+  - proptest P1 (idempotent), P2 (bracket-invariant), P3 (union-as-group,
+    with an explicit name-disjointness `prop_assume!`), using
+    `input_and_entries()` + the `input_listings()` shared-listings carrier:
+    all three laws regroup a fixed atom multiset, so one `fetch` is sound.
+    Adding `Group` to `Arbitrary for Input` also exercises groups inside
+    existing P4/P5 fragments (they hold: `group` is a function of its
+    children's denotation, and the laws only regroup). Shared repo names
+    arise naturally from the `r[123]` alphabet; cross-fragment bucket
+    sharing is reachable via the small 6-bucket pool but random — add a
+    knob to force same-bucket fragments if merge coverage turns out thin.
+- A migration note ships with this chunk (guide + code comment): for users
+  coming from Pachyderm's `group` input, falconeri's merge key is the
+  datum name (repo + star binding), not a `groupBy` pattern, and the merged
+  datum materializes as one `/pfs/<repo>/<binding>/` directory rather than
+  per-repo `/pfs` trees. Merging across distinct base URIs therefore
+  requires declaring the same repo name over those URIs.
 - Guide: document `group`, including the migration note.
+
+**Related fix (landed 2026-09-26).** The whole-job collision check used to
+run once over the entries of *all* datums flattened together, which
+rejected any `cross` with a multi-datum operand (crosses legitimately
+repeat one entry URI across datums). Now fixed: `check_datum_collisions`
+runs the URI-keyed check per-datum — one datum, one worker filesystem view
+— with regression tests for all three cases (cross repeats OK; object/prefix
+pair in *different* datums OK; within-datum collisions rejected). C4's
+clobber check lands folded into the same function, as a second per-datum
+pass keyed on `local_path`. Consequence for C4: exact-duplicate rows in
+one merged datum (two `group` children with the same base + glob) are a
+per-datum "duplicate bucket entries" error, which is the intended
+behavior.
 
 **Deferred (after the algebra lands).**
 
-- Spec-level validation at `job run` per §5.1(2)–(3).
-- Persisting datum names (a `names` column; schema change; open question 3).
-- Possibly a `groupBy`-style pattern merge as a follow-up to `group`.
+- Spec-level validation at `job run` per §5.1(2) (the §5.1(3) clobber check
+  lands in C4).
+- Persisting datum names (a `names` column; schema change; open question 3;
+  should store `repo` and `group_key` if the latter lands).
+
+### The biggest open algebra question: `group_key` (sketched 2026-09-26)
+
+Our merge key `(repo, binding)` conflates two concepts: `repo` is both
+_placement_ (the `/pfs/<repo>/` root) and _identity_ (what `group` matches
+on). The proposed generalization adds an optional per-atom `group_key`,
+defaulting to `repo`, and makes the merge key (and the name slot)
+`(group_key, binding)`. Defaulted, it is _exactly_ today's semantics — the
+same-repo idiom is just a shared default key — so C4 is the default
+instantiation of the extension, not a legacy case to migrate. Setting a
+shared `group_key` across _different_ repo names enables the diagonal join
+Pachyderm-style group provides (a worker sees `/pfs/a/E/` and `/pfs/b/E/`
+as one datum), while keeping merging typed intent: coincidental star-match
+equality stays inert, which was our main objection to binding-only names.
+The key extension argument is that it is clash-conservative: the new
+merges span different `/pfs` roots and therefore cannot introduce
+file-level clashes by construction, so `check_datum_collisions` and the
+clobber check stay complete without change.
+
+Adopting it later would require restatement, not repair: P1–P3 are
+unaffected (keys ride in name tuples through `cross`; the P3 premise is
+about name distinctness, whatever slots hold), while P7's "the name is the
+directory the datum writes into" weakens to "the name is the work item's
+identity; clashes are possible only among same-root rows" — an explanation
+of why safety is free, rather than a safety mechanism itself. The docs'
+mental model becomes one sentence — "`repo` says where your data lands;
+`group_key` says when two sources are the same thing" — and the
+migration note gets simpler (declare a shared `group_key`, instead of
+reusing a repo name and accepting tree overlay). Open sub-decisions if it
+lands: naming (avoid confusion with the `group` combinator), whether
+whole-repo `"/"` atoms with a shared key should merge (likely yes), and
+rejecting a never-merge-unless-declared default, which would kill the
+overlay idiom. Nothing shipped prevents this; if we got the fork wrong,
+this is the door back.
 
 ## Appendix A: the `"/*"` history (resolved)
 

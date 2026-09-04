@@ -233,6 +233,10 @@ pub enum Input {
     /// Union of two other inputs
     #[schema(no_recursion)]
     Union(Vec<Input>),
+    /// Merge the datums of our children which share a datum name (a tuple of
+    /// `(repo, star-binding)` slots).
+    #[schema(no_recursion)]
+    Group(Vec<Input>),
 }
 
 /// How to distribute files from an input across workers.
@@ -623,10 +627,14 @@ pub mod tests {
                 3, // Max items per collection.
                 |inner| {
                     prop_oneof![
+                        // Pick a recursive `Input` type and give it
+                        // 0...3 children.
                         prop::collection::vec(inner.clone(), 0..3)
                             .prop_map(Input::Union),
                         prop::collection::vec(inner.clone(), 0..3)
                             .prop_map(Input::Cross),
+                        prop::collection::vec(inner.clone(), 0..3)
+                            .prop_map(Input::Group),
                     ]
                 },
             )

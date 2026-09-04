@@ -15,7 +15,7 @@
 //! (files and subdirectories), which is what the algebra's `"/*"` glob
 //! distributes over.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use async_recursion::async_recursion;
 use falconeri_common::{
@@ -104,14 +104,7 @@ impl Listings {
                         if !self.base_uris.contains_key(&base) {
                             let listing =
                                 storage.list_nonrecursive(base.as_str()).await?;
-                            // BaseUri::normalize should force the URI to end in
-                            // "/", which should in turn force
-                            // `BucketListing::PrefixEntries`.
-                            assert!(matches!(
-                                listing,
-                                BucketListing::PrefixEntries(_),
-                            ));
-                            self.base_uris.insert(base.clone(), listing);
+                            self.base_uri_insert(base.clone(), listing);
                         }
                     }
                     // Subpaths like "/*/$SUBPATH" are a little tricker.
@@ -119,8 +112,7 @@ impl Listings {
                         let matches = storage
                             .list_subpath_entries(base.as_str(), subpath)
                             .await?;
-                        self.subpath_matches
-                            .insert((base.clone(), subpath.clone()), matches);
+                        self.subpath_matches_insert(base.clone(), subpath, matches);
                     }
                     // Nothing to fetch, since we'll just use the whole thing.
                     Glob::WholeRepo => {
@@ -130,7 +122,9 @@ impl Listings {
                     }
                 }
             }
-            Input::Cross(inputs) | Input::Union(inputs) => {
+            // Combining constructs add no new atoms, but recurse through their
+            // children.
+            Input::Cross(inputs) | Input::Union(inputs) | Input::Group(inputs) => {
                 for input in inputs {
                     // Call recursively. We need `boxed_local` so that the impl
                     // Future type created by this function isn't an infinitely
@@ -139,13 +133,30 @@ impl Listings {
                 }
             }
         }
-        Ok::<_, Error>(())
+        Ok(())
     }
 
-    /// (Test only.) Insert a listing for `base` into the listings.
-    #[cfg(test)]
+    /// Insert a listing for `base`, replacing any existing one.
     fn base_uri_insert(&mut self, base: BaseUri, listing: BucketListing) {
+        // Listing a normalized `BaseUri` (trailing "/") must always yield
+        // directory entries, never a single object. Enforced here so every
+        // reader of `base_uris` can rely on it.
+        assert!(matches!(listing, BucketListing::PrefixEntries(_)));
         self.base_uris.insert(base, listing);
+    }
+
+    /// Insert probe matches for `{base}/*/{subpath}`, keyed by the _raw_
+    /// subpath: the slash spelling is preserved, since the storage layer
+    /// gives `"p"` and `"p/"` different matching rules (see
+    /// [`glob_subpath`], which normalizes).
+    fn subpath_matches_insert(
+        &mut self,
+        base: BaseUri,
+        subpath: &str,
+        matches: Vec<BucketEntry>,
+    ) {
+        self.subpath_matches
+            .insert((base, subpath.to_owned()), matches);
     }
 
     /// Look up the listing for `base`.
@@ -271,18 +282,61 @@ pub async fn input_to_datums(
     Ok((all_datums, all_input_files))
 }
 
-/// Check each datum's input files for bucket entry collisions.
+/// Check each datum's input files for bucket entry collisions and local-path
+/// clobbers.
 ///
 /// We check each datum separately, because datums get their own `/pfs`
 /// filesystems in the worker, and because `cross` normally introduces
 /// duplicate entries _across_ datums: the same file can legitimately appear
 /// in many datums. Checking the flattened set of all entries across all
 /// datums would reject any `cross` with a multi-datum operand.
+///
+/// The second pass is the clobber check (`plans/INPUT_ALGEBRA_EXTENSIONS.md`
+/// §5.1(3)): within one datum, no
+/// two _file_ rows (`local_path` without a trailing slash) may share a
+/// `local_path` while pointing at different `uri`s, because the worker would
+/// download both to one place and leave last-write-wins. It is general, not
+/// `group`-scoped: the same-repo `cross` that clobbers this way is deeply
+/// dubious, and failing is intended. Written as "same `local_path` ⇒ same
+/// `uri`" so it does not depend on the duplicate-entry check running first,
+/// even though identical rows are already rejected above.
+///
+/// Two legal cases worth naming:
+///
+/// - Two _directory_ rows sharing a local directory are legal — merging two
+///   directory trees into one local directory is the whole point of `group`.
+///   Documented blind spot: two files of the same name _inside_ two merged
+///   directory rows still clobber silently, exactly as with whole-repo rows.
+///   Detecting that would require recursive listings, which we avoid.
+///
+/// - String comparison is exact for file rows: `uri` and `local_path` are
+///   both consistently encoded, and file rows keep their encoded form all
+///   the way to the worker's disk.
 fn check_datum_collisions(datums: &[DatumData]) -> Result<()> {
     for d in datums {
         let entries: Vec<_> = d.input_files.iter().map(|f| f.entry.clone()).collect();
         check_for_bucket_entry_collisions(&entries)
             .with_context(|| format!("collision in datum {:?}", d.name))?;
+
+        // Clobber check: file rows must agree on `uri` per `local_path`.
+        let mut uri_by_local: HashMap<&str, &str> = HashMap::new();
+        for f in &d.input_files {
+            if f.local_path.ends_with('/') {
+                continue; // directory row: sharing a directory is legal
+            }
+            if let Some(prev) =
+                uri_by_local.insert(f.local_path.as_str(), f.entry.uri())
+                && prev != f.entry.uri()
+            {
+                return Err(format_err!(
+                    "clobber in datum {:?}: {} and {} both download to {}",
+                    d.name,
+                    prev,
+                    f.entry.uri(),
+                    f.local_path,
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -294,9 +348,10 @@ fn check_datum_collisions(datums: &[DatumData]) -> Result<()> {
 /// it. The I/O phase ([`fetch_listings`]) is responsible for fetching a
 /// listing for _every_ atom base URI in `input`.
 ///
-/// This is a pure, deterministic function of its two inputs. It fails if the
-/// input would produce rows that clash in the worker's local file system
-/// (see [`verify_local_paths`]).
+/// This is a pure, deterministic function of its two inputs. Its remaining
+/// `Err` paths are I/O↔pure contract violations only: user-facing checks
+/// for filesystem clashes run outside the pure core, in
+/// [`input_to_datums`] (see [`check_datum_collisions`]).
 fn input_to_datums_pure(input: &Input, listings: &Listings) -> Result<Vec<DatumData>> {
     match input {
         Input::Atom { uri, repo, glob } => {
@@ -312,7 +367,53 @@ fn input_to_datums_pure(input: &Input, listings: &Listings) -> Result<Vec<DatumD
             Ok(datums)
         }
         Input::Cross(inputs) => cross_to_datums_pure(inputs, listings),
+        Input::Group(inputs) => group_to_datums_pure(inputs, listings),
     }
+}
+
+/// Interpret [`Input::Group`]: merge the datums of our children which share
+/// a [`DatumName`].
+fn group_to_datums_pure(
+    inputs: &[Input],
+    listings: &Listings,
+) -> Result<Vec<DatumData>> {
+    // We preserve first-appearance order mostly because it's well-defined, but
+    // our laws won't strictly require it. First-appearance order requires an
+    // insertion-ordered result, which we build by indexing into the output
+    // `Vec` by name.
+    let mut datums: Vec<DatumData> = vec![];
+    let mut first_by_name: HashMap<DatumName, usize> = HashMap::new();
+    let mut children_datums = 0usize;
+
+    // Iterate over the concatenated children's datums, in child order: one
+    // datum per distinct name, kept in first-appearance order, with files
+    // concatenated in encounter order. Datums with distinct names pass through
+    // untouched, and merging only ever combines rows whose _names_ are equal,
+    // which is what makes the merged `/pfs` footprint coherent
+    // (plans/INPUT_ALGEBRA_EXTENSIONS.md §3.2-3.3).
+    // Like the rest of the pure core, this never rejects its input: collision
+    // and clobber checks run outside, in [`input_to_datums`].
+    for child in inputs {
+        for datum in input_to_datums_pure(child, listings)? {
+            children_datums += 1;
+            match first_by_name.get(&datum.name) {
+                Some(&first) => datums[first].input_files.extend(datum.input_files),
+                None => {
+                    first_by_name.insert(datum.name.clone(), datums.len());
+                    datums.push(datum);
+                }
+            }
+        }
+    }
+
+    if datums.len() == children_datums {
+        // No names matched, so this behaves exactly like `Union`. That is
+        // legal (e.g., children with distinct repo names), but often worth
+        // knowing about when debugging a spec.
+        debug!("group merged no datums ({} children)", inputs.len());
+    }
+
+    Ok(datums)
 }
 
 /// Interpret a single `Input::Atom` into a list of datums, given the
@@ -404,8 +505,7 @@ fn glob_top_level_directory_entries(
 ///
 /// The datum's name binds the repo to `E`, and deliberately does not
 /// include the subpath. That way `/*/foo` and `/*/bar` over the same base
-/// produce matching names, which is what lets `group` merge them (once
-/// implemented).
+/// produce matching names, which is what lets [`Input::Group`] merge them.
 fn glob_subpath(
     base: &BaseUri,
     subpath: &str,
@@ -561,6 +661,10 @@ mod tests {
         Input::Cross(inputs)
     }
 
+    fn group(inputs: Vec<Input>) -> Input {
+        Input::Group(inputs)
+    }
+
     /// Build a `BaseUriListings` from `(base, files, dirs)` triples.
     fn base_uri_listings(pairs: &[(&str, &[&str], &[&str])]) -> Listings {
         let mut listings = Listings::default();
@@ -615,19 +719,26 @@ mod tests {
         }
     }
 
-    /// Sort a datum sequence, to compare "up to permutation" (datum order
-    /// is an implementation detail).
-    fn canonical(datums: Vec<DatumData>) -> Vec<DatumData> {
-        let mut v = datums;
-        v.sort();
-        v
+    /// Canonicalize a datum sequence for "up to permutation" comparison:
+    /// sorts the files _within_ each datum, then sorts the datums. Neither
+    /// datum order nor file order is semantic
+    /// (`plans/INPUT_ALGEBRA_EXTENSIONS.md` §3.3); a fully canonical
+    /// comparison means no law can accidentally start depending on it.
+    /// Deterministic output (order included) is still pinned by the
+    /// `determinism` proptest.
+    fn canonical(mut datums: Vec<DatumData>) -> Vec<DatumData> {
+        for d in &mut datums {
+            d.input_files.sort();
+        }
+        datums.sort();
+        datums
     }
 
     // ---- Pinned current behavior (unit tests) --------------------------------
     //
-    // These pin the behavior of the _current_ algebra, which (in the case of
-    // `"/*"`) is not the target semantics of `plans/INPUT_ALGEBRA_EXTENSIONS.md`
-    // §2. See the comment on each test, and on [`atom_to_datums_pure`].
+    // These pin the row shapes and naming rules of the input algebra spec,
+    // `plans/INPUT_ALGEBRA_EXTENSIONS.md` §2, which the current algebra
+    // implements. See the comment on each test.
 
     /// `"/"` (WholeRepo) produces exactly one datum, named `(repo, no
     /// binding)`, with exactly one file: the repo itself, as a directory
@@ -677,8 +788,8 @@ mod tests {
 
     /// An atom URI without a trailing `/` is normalized (to end in `/`)
     /// throughout: the pure core looks up the normalized base, and the rows
-    /// use it. Before the C1 fix, such a URI listed successfully but then
-    /// failed in [`uri_to_local_path`].
+    /// use it. An unnormalized URI would list successfully (as a prefix)
+    /// but then fail in [`uri_to_local_path`].
     #[test]
     fn atom_uri_without_trailing_slash_is_normalized() {
         let map = base_uri_listings(&[("gs://b/data/", &["gs://b/data/a.txt"], &[])]);
@@ -777,8 +888,8 @@ mod tests {
     }
 
     /// `Cross([])` produces zero datums. The empty product "should" be one
-    /// datum (with no files); this pins the existing quirk. (Plan §5.1(5):
-    /// left as-is.)
+    /// datum (with no files); this pins the existing quirk, which
+    /// `plans/INPUT_ALGEBRA_EXTENSIONS.md` §5.1(5) leaves as-is.
     #[test]
     fn cross_of_zero_inputs_is_zero_datums() {
         let datums =
@@ -869,6 +980,248 @@ mod tests {
         assert!(check_datum_collisions(&[dup]).is_err());
     }
 
+    // ---- Group: merging by datum name (plans/INPUT_ALGEBRA_EXTENSIONS.md §3) --
+
+    /// The group idiom: two atoms declare the same repo name over distinct
+    /// bases; `group` merges their same-named datums into one datum whose
+    /// rows materialize as one merged `/pfs/<repo>/<binding>/` directory.
+    #[test]
+    fn group_merges_same_repo_name_over_two_bases() {
+        let map = base_uri_listings(&[
+            ("gs://b/1/", &[], &["gs://b/1/alpha/"]),
+            ("gs://b/2/", &[], &["gs://b/2/alpha/"]),
+        ]);
+        let input = group(vec![
+            atom("gs://b/1/", "r", Glob::TopLevelDirectoryEntries),
+            atom("gs://b/2/", "r", Glob::TopLevelDirectoryEntries),
+        ]);
+        let datums = input_to_datums_pure(&input, &map).unwrap();
+        assert_eq!(
+            canonical(datums.clone()),
+            canonical(vec![datum(
+                &[("r", Some("alpha"))],
+                &[
+                    ("gs://b/1/alpha/", "/pfs/r/alpha/"),
+                    ("gs://b/2/alpha/", "/pfs/r/alpha/"),
+                ],
+            )])
+        );
+        // The merged datum passes the collision check: two _directory_ rows
+        // sharing a local directory is the point of the merge.
+        check_datum_collisions(&datums).unwrap();
+    }
+
+    /// Distinct repo names never merge, so `group` is a no-op (it logs at
+    /// `debug!`).
+    #[test]
+    fn group_of_distinct_repo_names_is_a_noop() {
+        let map = base_uri_listings(&[
+            ("gs://b/1/", &[], &["gs://b/1/alpha/"]),
+            ("gs://b/2/", &[], &["gs://b/2/alpha/"]),
+        ]);
+        let input = group(vec![
+            atom("gs://b/1/", "r1", Glob::TopLevelDirectoryEntries),
+            atom("gs://b/2/", "r2", Glob::TopLevelDirectoryEntries),
+        ]);
+        assert_eq!(
+            canonical(input_to_datums_pure(&input, &map).unwrap()),
+            canonical(vec![
+                datum(
+                    &[("r1", Some("alpha"))],
+                    &[("gs://b/1/alpha/", "/pfs/r1/alpha/")],
+                ),
+                datum(
+                    &[("r2", Some("alpha"))],
+                    &[("gs://b/2/alpha/", "/pfs/r2/alpha/")],
+                ),
+            ])
+        );
+    }
+
+    /// `Group([])` produces zero datums, consistent with `Union([])` and
+    /// the `Cross([])` quirk.
+    #[test]
+    fn group_of_zero_inputs_is_zero_datums() {
+        let datums =
+            input_to_datums_pure(&group(vec![]), &Listings::default()).unwrap();
+        assert!(datums.is_empty());
+    }
+
+    /// Documented non-law (`plans/INPUT_ALGEBRA_EXTENSIONS.md` §3.3):
+    /// `cross` does _not_ distribute over
+    /// `group`. With `B` and `C` declaring the same repo name over two bases
+    /// and a common entry `x`, the regrouped RHS contributes `A`'s row
+    /// _twice_ to the merged datum. The difference is in row multiplicity,
+    /// so it is visible up to permutation. At the `input_to_datums` layer,
+    /// the RHS is rejected outright (duplicate entry within one datum), so
+    /// such a spec never runs.
+    #[test]
+    fn cross_does_not_distribute_over_group() {
+        let map = base_uri_listings(&[
+            ("gs://b/a/", &["gs://b/a/x"], &[]),
+            ("gs://b/b1/", &["gs://b/b1/x"], &[]),
+            ("gs://b/b2/", &["gs://b/b2/x"], &[]),
+        ]);
+        let a = || atom("gs://b/a/", "ra", Glob::TopLevelDirectoryEntries);
+        let b = || atom("gs://b/b1/", "r", Glob::TopLevelDirectoryEntries);
+        let c = || atom("gs://b/b2/", "r", Glob::TopLevelDirectoryEntries);
+
+        let lhs = input_to_datums_pure(&cross(vec![a(), group(vec![b(), c()])]), &map)
+            .unwrap();
+        let rhs = input_to_datums_pure(
+            &group(vec![cross(vec![a(), b()]), cross(vec![a(), c()])]),
+            &map,
+        )
+        .unwrap();
+
+        assert_eq!(
+            canonical(lhs.clone()),
+            canonical(vec![datum(
+                &[("ra", Some("x")), ("r", Some("x"))],
+                &[
+                    ("gs://b/a/x", "/pfs/ra/x"),
+                    ("gs://b/b1/x", "/pfs/r/x"),
+                    ("gs://b/b2/x", "/pfs/r/x"),
+                ],
+            )])
+        );
+        assert_eq!(
+            canonical(rhs.clone()),
+            canonical(vec![datum(
+                &[("ra", Some("x")), ("r", Some("x"))],
+                &[
+                    ("gs://b/a/x", "/pfs/ra/x"),
+                    ("gs://b/a/x", "/pfs/ra/x"),
+                    ("gs://b/b1/x", "/pfs/r/x"),
+                    ("gs://b/b2/x", "/pfs/r/x"),
+                ],
+            )])
+        );
+        // The duplicated `A` row is a duplicate-entry error downstream.
+        assert!(check_datum_collisions(&rhs).is_err());
+    }
+
+    // ---- Clobber check (plans/INPUT_ALGEBRA_EXTENSIONS.md §5.1(3)) ------------
+
+    /// Two _file_ rows in one datum, same `local_path`, different `uri`: the
+    /// worker would download both to one place, last-write-wins. Rejected.
+    /// (Group idiom variant: same repo name, same glob, two bases, matching
+    /// top-level _file_ entries.)
+    #[test]
+    fn clobbered_file_rows_are_rejected() {
+        let d = datum(
+            &[("r", Some("alpha"))],
+            &[
+                ("gs://b/1/alpha", "/pfs/r/alpha"),
+                ("gs://b/2/alpha", "/pfs/r/alpha"),
+            ],
+        );
+        assert!(check_datum_collisions(&[d]).is_err());
+    }
+
+    /// A same-repo-name `cross` over two bases clobbers the same way with no
+    /// `group` involved; the check is per-datum and general, and failing is
+    /// intended.
+    #[test]
+    fn cross_of_same_repo_name_over_two_bases_is_rejected() {
+        let map = base_uri_listings(&[
+            ("gs://b/1/", &["gs://b/1/x"], &[]),
+            ("gs://b/2/", &["gs://b/2/x"], &[]),
+        ]);
+        let input = cross(vec![
+            atom("gs://b/1/", "r", Glob::TopLevelDirectoryEntries),
+            atom("gs://b/2/", "r", Glob::TopLevelDirectoryEntries),
+        ]);
+        let datums = input_to_datums_pure(&input, &map).unwrap();
+        // The pure core itself does not check...
+        assert_eq!(datums.len(), 1);
+        // ...but one datum now holds two `x` files with the same local path
+        // and different URIs.
+        assert!(check_datum_collisions(&datums).is_err());
+    }
+
+    /// Legal by design: two _directory_ rows sharing a local directory are
+    /// exempt from the clobber check (merging trees is the point of `group`).
+    #[test]
+    fn merged_directory_rows_may_share_local_path() {
+        let d = datum(
+            &[("r", Some("alpha"))],
+            &[
+                ("gs://b/1/alpha/", "/pfs/r/alpha/"),
+                ("gs://b/2/alpha/", "/pfs/r/alpha/"),
+            ],
+        );
+        check_datum_collisions(&[d]).unwrap();
+    }
+
+    // ---- Glob::Subpath row shapes ---------------------------------------------
+
+    /// Build a `Listings` with pre-probed subpath matches.
+    fn subpath_listings(rows: &[(&str, &str, &[&str])]) -> Listings {
+        let mut listings = Listings::default();
+        for &(base, subpath, matches) in rows {
+            let entries = matches
+                .iter()
+                .map(|&m| {
+                    if m.ends_with('/') {
+                        BucketEntry::Prefix(
+                            BucketPrefix::from_uri(m.to_owned())
+                                .expect("invalid bucket prefix"),
+                        )
+                    } else {
+                        BucketEntry::Object(BucketObject::from_uri_for_test(m, 0))
+                    }
+                })
+                .collect();
+            listings.subpath_matches_insert(
+                BaseUri::normalize(base),
+                subpath,
+                entries,
+            );
+        }
+        listings
+    }
+
+    /// A _file_ match of `/*/p` yields one datum named for the top-level
+    /// entry `E` (the subpath is deliberately _not_ part of the name), with
+    /// one file row `/pfs/R/E/p` — no trailing slash.
+    #[test]
+    fn subpath_file_row_shape() {
+        let map =
+            subpath_listings(&[("gs://b/data/", "out", &["gs://b/data/alpha/out"])]);
+        let input = atom("gs://b/data/", "r", Glob::Subpath("out".to_owned()));
+        assert_eq!(
+            input_to_datums_pure(&input, &map).unwrap(),
+            vec![datum(
+                &[("r", Some("alpha"))],
+                &[("gs://b/data/alpha/out", "/pfs/r/alpha/out")],
+            )]
+        );
+    }
+
+    /// A _directory_ match yields `/pfs/R/E/p/` (trailing slash), which the
+    /// worker syncs recursively. A slash-terminated subpath `"p/"` names the
+    /// same directory and produces the same row (only prefixes can match
+    /// it — the probe layer guarantees this).
+    #[test]
+    fn subpath_directory_row_shape() {
+        let map = subpath_listings(&[
+            ("gs://b/data/", "out", &["gs://b/data/alpha/out/"]),
+            ("gs://b/data/", "out/", &["gs://b/data/alpha/out/"]),
+        ]);
+        for subpath in ["out", "out/"] {
+            let input = atom("gs://b/data/", "r", Glob::Subpath(subpath.to_owned()));
+            assert_eq!(
+                input_to_datums_pure(&input, &map).unwrap(),
+                vec![datum(
+                    &[("r", Some("alpha"))],
+                    &[("gs://b/data/alpha/out/", "/pfs/r/alpha/out/")],
+                )],
+                "subpath {subpath:?}",
+            );
+        }
+    }
+
     /// Given a URI and a repo name, construct a local path starting with
     /// "/pfs" pointing to where we should download the file.
     #[test]
@@ -890,6 +1243,11 @@ mod tests {
     // They need to be large enough to hit all the interesting corner cases,
     // but small enough that we _find_ the interesting interactions between
     // multiple generators, and small enough that we can search quickly.
+    //
+    // The two-sided law tests check the numbered properties P1–P5, and the
+    // known non-law, of the input algebra spec:
+    // `plans/INPUT_ALGEBRA_EXTENSIONS.md` §3.3. Laws ignore datum order and
+    // row order (see `canonical`); determinism is pinned separately.
     //
     // IMPORTANT: At the "pure" layer, we do not worry about duplicate names.
     // These are checked for _outside_ the pure layer. This allows our testing
@@ -980,7 +1338,9 @@ mod tests {
                 let base_uri = BaseUri::normalize(&uri);
                 glob_entries(base_uri, glob).boxed()
             }
-            Input::Cross(inputs) | Input::Union(inputs) => {
+            // `Cross`, `Union`, and `Group` all regroup the same atoms, so
+            // their entries are just the flattened children's entries.
+            Input::Cross(inputs) | Input::Union(inputs) | Input::Group(inputs) => {
                 // Getting tricky here. First, we build a
                 // Vec<BoxedStrategy<Vec<_>>> using the usual tools.
                 let entry_strategies: Vec<BoxedStrategy<Vec<BucketEntry>>> =
@@ -1090,6 +1450,107 @@ mod tests {
             );
         }
 
+        /// P1: Group is idempotent. After one merge pass, names are unique,
+        /// so a second pass merges nothing.
+        #[test]
+        fn group_is_idempotent(input_a in input_and_entries()) {
+            let listings = input_listings(&[&input_a]);
+            let once = group(vec![input_a.input.clone()]);
+            let twice = group(vec![once.clone()]);
+            prop_assert_eq!(
+                canonical(input_to_datums_pure_checked(&twice, &listings)),
+                canonical(input_to_datums_pure_checked(&once, &listings))
+            );
+        }
+
+        /// P2: Group is bracket-invariant: `G` depends only on the flat
+        /// concatenation of its children's datums.
+        #[test]
+        fn group_bracket_invariant(
+            input_a in input_and_entries(),
+            input_b in input_and_entries(),
+            input_c in input_and_entries(),
+        ) {
+            let listings = input_listings(&[&input_a, &input_b, &input_c]);
+            let lhs = group(vec![
+                input_a.input.clone(),
+                input_b.input.clone(),
+                input_c.input.clone(),
+            ]);
+            let rhs = group(vec![
+                group(vec![input_a.input, input_b.input]),
+                input_c.input,
+            ]);
+            prop_assert_eq!(
+                canonical(input_to_datums_pure_checked(&lhs, &listings)),
+                canonical(input_to_datums_pure_checked(&rhs, &listings))
+            );
+        }
+
+        /// P3: Union is a special case of Group: when every datum name in
+        /// the _concatenated_ children is pairwise distinct, there is
+        /// nothing to merge, and `G([A, B]) = U([A, B])`.
+        ///
+        /// The premise is about the concatenation, not cross-child
+        /// disjointness: a child may contain duplicate names itself (e.g.,
+        /// the union of two whole-repo atoms with the same repo name), and
+        /// `G` merges those while `U` does not. That merging of in-child
+        /// duplicates is exactly what P2's bracket-invariance demands of
+        /// `G`.
+        ///
+        /// The premise is checked at runtime against the fragments' shared
+        /// denotations; if rejection ever starves case search, upgrade to
+        /// disjoint-by-construction repo alphabets via a parameterized
+        /// generator.
+        #[test]
+        fn union_is_a_special_case_of_group(
+            input_a in input_and_entries(),
+            input_b in input_and_entries(),
+        ) {
+            let listings = input_listings(&[&input_a, &input_b]);
+            let names = |input: &Input| {
+                input_to_datums_pure_checked(input, &listings)
+                    .into_iter()
+                    .map(|d| d.name)
+                    .collect::<Vec<_>>()
+            };
+            let mut all_names = names(&input_a.input);
+            all_names.extend(names(&input_b.input));
+            let deduped = all_names.iter().collect::<BTreeSet<_>>();
+            prop_assume!(
+                deduped.len() == all_names.len(),
+                "premise: every datum name in the concatenated children must be unique",
+            );
+            let grouped = group(vec![input_a.input.clone(), input_b.input.clone()]);
+            let unioned = union(vec![input_a.input, input_b.input]);
+            prop_assert_eq!(
+                canonical(input_to_datums_pure_checked(&grouped, &listings)),
+                canonical(input_to_datums_pure_checked(&unioned, &listings))
+            );
+        }
+
+        /// P4: Cross distributes over Union (up to permutation).
+        #[test]
+        fn cross_distributes_over_union(
+            input_a in input_and_entries(),
+            input_b in input_and_entries(),
+            input_c in input_and_entries(),
+        ) {
+            let listings = input_listings(&[&input_a, &input_b, &input_c]);
+            let lhs = cross(vec![
+                input_a.input.clone(),
+                union(vec![input_b.input.clone(), input_c.input.clone()]),
+            ]);
+            let rhs = union(vec![
+                cross(vec![input_a.input.clone(), input_b.input.clone()]),
+                cross(vec![input_a.input, input_c.input]),
+            ]);
+            prop_assert_eq!(
+                canonical(input_to_datums_pure_checked(&lhs, &listings)),
+                canonical(input_to_datums_pure_checked(&rhs, &listings))
+            );
+        }
+
         /// P5: Union is commutative (up to permutation).
         #[test]
         fn union_commutes(
@@ -1128,28 +1589,6 @@ mod tests {
             prop_assert_eq!(
                 canonical(input_to_datums_pure_checked(&ab_c, &listings)),
                 canonical(input_to_datums_pure_checked(&a_bc, &listings))
-            );
-        }
-
-        /// P4: Cross distributes over Union (up to permutation).
-        #[test]
-        fn cross_distributes_over_union(
-            input_a in input_and_entries(),
-            input_b in input_and_entries(),
-            input_c in input_and_entries(),
-        ) {
-            let listings = input_listings(&[&input_a, &input_b, &input_c]);
-            let lhs = cross(vec![
-                input_a.input.clone(),
-                union(vec![input_b.input.clone(), input_c.input.clone()]),
-            ]);
-            let rhs = union(vec![
-                cross(vec![input_a.input.clone(), input_b.input.clone()]),
-                cross(vec![input_a.input, input_c.input]),
-            ]);
-            prop_assert_eq!(
-                canonical(input_to_datums_pure_checked(&lhs, &listings)),
-                canonical(input_to_datums_pure_checked(&rhs, &listings))
             );
         }
     }
