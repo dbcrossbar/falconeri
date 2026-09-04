@@ -20,4 +20,5 @@ utoipa = "5.4.0"
 utoipa-axum = "0.2.0"
 
 [dev-dependencies]
+falconeri_common = { path = "../falconeri_common", features = ["testing"] }
 proptest = { workspace = true }

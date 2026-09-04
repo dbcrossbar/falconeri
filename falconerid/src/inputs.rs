@@ -24,8 +24,8 @@ use falconeri_common::{
     prelude::*,
     secret::Secret,
     storage::{
-        BucketEntry, BucketListing, BucketPrefix, CloudStorage,
-        check_for_bucket_entry_collisions,
+        BucketEntry, BucketListing, BucketPrefix, CloudStorageForUri,
+        CloudStorageResolver, check_for_bucket_entry_collisions,
     },
 };
 
@@ -76,19 +76,23 @@ impl Listings {
     #[instrument(skip_all, level = "trace")]
     async fn fetch(secrets: &[Secret], input: &Input) -> Result<Listings> {
         debug!("fetching atom listings");
+        let mut resolver = CloudStorageResolver::new(secrets.to_owned());
         let mut listings = Listings::default();
-        listings.fetch_helper(secrets, input).await?;
+        listings.fetch_helper(&mut resolver, input).await?;
         Ok(listings)
     }
 
     /// Internal fetch helper.
     #[async_recursion]
-    async fn fetch_helper(&mut self, secrets: &[Secret], input: &Input) -> Result<()> {
+    async fn fetch_helper(
+        &mut self,
+        resolver: &mut dyn CloudStorageForUri,
+        input: &Input,
+    ) -> Result<()> {
         match input {
             Input::Atom { uri, glob, .. } => {
                 let base = BaseUri::normalize(uri);
-                let storage =
-                    <dyn CloudStorage>::for_uri(base.as_str(), secrets).await?;
+                let storage = resolver.for_uri(base.as_str()).await?;
                 match glob {
                     // We need a listing to handle "/*", so fetch it.
                     Glob::TopLevelDirectoryEntries => {
@@ -119,7 +123,7 @@ impl Listings {
                     // Call recursively. We need `boxed_local` so that the impl
                     // Future type created by this function isn't an infinitely
                     // recursive type.
-                    self.fetch_helper(secrets, input).await?;
+                    self.fetch_helper(resolver, input).await?;
                 }
             }
         }

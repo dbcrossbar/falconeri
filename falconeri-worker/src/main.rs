@@ -5,7 +5,7 @@ use std::{env, fs, io::ErrorKind, process::Stdio, sync::Arc, time::Duration};
 use falconeri_common::{
     prelude::*,
     rest_api::{Client, OutputFilePatch, OutputFilePost},
-    storage::CloudStorage,
+    storage::{self, CloudStorageForUri as _, CloudStorageResolver},
     tracing_support::initialize_tracing,
 };
 use tokio::{
@@ -126,7 +126,8 @@ async fn process_datum(
     for file in files {
         // We don't pass in any `secrets` here, because those are supposed to
         // be specified in our Kubernetes job when it's created.
-        let storage = <dyn CloudStorage>::for_uri(&file.uri, &[]).await?;
+        let mut resolver = CloudStorageResolver::new(vec![]);
+        let storage = resolver.for_uri(&file.uri).await?;
         storage
             .sync_down(&file.uri, Path::new(&file.local_path))
             .await?;
@@ -307,12 +308,13 @@ async fn upload_outputs(client: &Client, job: &Job, datum: &Datum) -> Result<()>
             .to_str()
             .ok_or_else(|| format_err!("invalid characters in {:?}", rel_path))?;
 
-        // Build the URI we want to upload to.
-        let mut uri = job.egress_uri.clone();
-        if !uri.ends_with('/') {
-            uri.push('/');
-        }
-        uri.push_str(rel_path_str);
+        // Build the URI we want to upload to. Our egress URI names a prefix,
+        // but pipeline specs don't always spell it canonically.
+        let uri = format!(
+            "{}{}",
+            storage::to_prefix_uri(&job.egress_uri),
+            rel_path_str
+        );
 
         new_output_files.push(OutputFilePost { uri });
     }
@@ -320,14 +322,24 @@ async fn upload_outputs(client: &Client, job: &Job, datum: &Datum) -> Result<()>
     // Create database records for the files we're about to upload.
     let output_files = client.create_output_files(datum, &new_output_files).await?;
 
-    // Upload all our files in a batch, for maximum performance.
-    let storage = <dyn CloudStorage>::for_uri(&job.egress_uri, &[]).await?;
+    // Upload all our files in a batch, for maximum performance. `/pfs/out` is a
+    // directory, so our egress URI must have a trailing slash to keep
+    // `sync_up_dir` happy.
+    let mut resolver = CloudStorageResolver::new(vec![]);
+    let storage = resolver.for_uri(&job.egress_uri).await?;
     let result = storage
-        .sync_up(Path::new("/pfs/out/"), &job.egress_uri)
+        .sync_up_dir(
+            Path::new("/pfs/out/"),
+            &storage::to_prefix_uri(&job.egress_uri),
+        )
         .await;
-    let status = match result {
+    let status = match &result {
         Ok(()) => Status::Done,
-        Err(_) => Status::Error,
+        Err(e) => {
+            // Don't lose the reason for the failure.
+            error!("error uploading outputs for datum {}: {e:#}", datum.id);
+            Status::Error
+        }
     };
 
     // Record what happened.
