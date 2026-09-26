@@ -258,13 +258,7 @@ pub async fn input_to_datums(
     // individual buckets, but now we need to do it with the full set
     // of paths. It's possible we want to check *more* edge cases than
     // we do here.
-    let mut all_entries = vec![];
-    for d in &datum_datas {
-        for f in &d.input_files {
-            all_entries.push(f.entry.clone());
-        }
-    }
-    check_for_bucket_entry_collisions(&all_entries)?;
+    check_datum_collisions(&datum_datas)?;
 
     let mut all_datums = vec![];
     let mut all_input_files = vec![];
@@ -275,6 +269,22 @@ pub async fn input_to_datums(
         all_input_files.extend(input_files);
     }
     Ok((all_datums, all_input_files))
+}
+
+/// Check each datum's input files for bucket entry collisions.
+///
+/// We check each datum separately, because datums get their own `/pfs`
+/// filesystems in the worker, and because `cross` normally introduces
+/// duplicate entries _across_ datums: the same file can legitimately appear
+/// in many datums. Checking the flattened set of all entries across all
+/// datums would reject any `cross` with a multi-datum operand.
+fn check_datum_collisions(datums: &[DatumData]) -> Result<()> {
+    for d in datums {
+        let entries: Vec<_> = d.input_files.iter().map(|f| f.entry.clone()).collect();
+        check_for_bucket_entry_collisions(&entries)
+            .with_context(|| format!("collision in datum {:?}", d.name))?;
+    }
+    Ok(())
 }
 
 /// (Pure core.) Interpret an `Input` into a sequence of [`DatumData`], given
@@ -785,6 +795,78 @@ mod tests {
             input_to_datums_pure(&cross(vec![input.clone()]), &map).unwrap(),
             input_to_datums_pure(&input, &map).unwrap()
         );
+    }
+
+    /// Regression test: `cross` legitimately places the same file in many
+    /// datums, and the collision check must run per-datum, not over the
+    /// flattened set of all datums. (The old global check rejected any
+    /// `cross` with a multi-datum operand with "duplicate bucket entries
+    /// found", and also rejected object/prefix pairs living in _different_
+    /// datums, which never share a filesystem.)
+    #[test]
+    fn cross_repeats_files_across_datums_without_collision() {
+        let map = base_uri_listings(&[
+            ("gs://b/a/", &["gs://b/a/1.txt", "gs://b/a/2.txt"], &[]),
+            ("gs://b/b/", &["gs://b/b/1.txt"], &[]),
+        ]);
+        let input = cross(vec![
+            atom("gs://b/a/", "ra", Glob::TopLevelDirectoryEntries),
+            atom("gs://b/b/", "rb", Glob::TopLevelDirectoryEntries),
+        ]);
+        let datums = input_to_datums_pure(&input, &map).unwrap();
+
+        // Sanity check: the same file really does appear in multiple datums,
+        // so the flattened set of all entries contains duplicates.
+        assert_eq!(datums.len(), 2);
+        let all_uris: Vec<_> = datums
+            .iter()
+            .flat_map(|d| d.input_files.iter().map(|f| f.entry.uri().to_owned()))
+            .collect();
+        assert_eq!(
+            all_uris.iter().filter(|u| *u == "gs://b/b/1.txt").count(),
+            2
+        );
+
+        // The per-datum check accepts this, because each datum gets its own
+        // "/pfs" filesystem in the worker.
+        check_datum_collisions(&datums).unwrap();
+
+        // ...but the old flattened, whole-job check (the bug) would have
+        // rejected it.
+        let flat: Vec<_> = datums
+            .iter()
+            .flat_map(|d| d.input_files.iter().map(|f| f.entry.clone()))
+            .collect();
+        assert!(check_for_bucket_entry_collisions(&flat).is_err());
+    }
+
+    /// Two separate datums may hold an object `x` and a prefix `x/y/`: they
+    /// never share a filesystem, so this is not a collision.
+    #[test]
+    fn shadowed_prefix_in_different_datums_is_ok() {
+        let datums = vec![
+            datum(&[("r", None)], &[("gs://b/x", "/pfs/r/x")]),
+            datum(&[("r", None)], &[("gs://b/x/y/", "/pfs/r/x/y/")]),
+        ];
+        check_datum_collisions(&datums).unwrap();
+    }
+
+    /// Real collisions _within_ a single datum are still detected: an object
+    /// `x` and a prefix `x/y/` cannot coexist in one datum's filesystem, and
+    /// neither can two copies of the same URI.
+    #[test]
+    fn within_datum_collisions_are_rejected() {
+        let shadow = datum(
+            &[("r", None)],
+            &[("gs://b/x", "/pfs/r/x"), ("gs://b/x/y/", "/pfs/r/x/y/")],
+        );
+        assert!(check_datum_collisions(&[shadow]).is_err());
+
+        let dup = datum(
+            &[("r", None)],
+            &[("gs://b/x", "/pfs/r/x"), ("gs://b/x", "/pfs/r/x")],
+        );
+        assert!(check_datum_collisions(&[dup]).is_err());
     }
 
     /// Given a URI and a repo name, construct a local path starting with
