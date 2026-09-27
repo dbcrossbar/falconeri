@@ -2,7 +2,7 @@
 
 use std::{collections::HashSet, env, fmt, iter, process::Stdio, time::Duration};
 
-use rand::{Rng, distr::Alphanumeric, rng};
+use rand::{RngExt, distr::Alphanumeric, rng};
 use serde::de::{Deserialize, DeserializeOwned};
 use serde_json;
 use tokio::{io::AsyncWriteExt, process::Command};

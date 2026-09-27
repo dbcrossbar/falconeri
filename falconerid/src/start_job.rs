@@ -3,13 +3,8 @@
 use std::cmp::min;
 
 use falconeri_common::{
-    cast,
-    diesel_async::{AsyncConnection, scoped_futures::ScopedFutureExt},
-    kubernetes,
-    manifest::render_manifest,
-    pipeline::*,
-    prelude::*,
-    serde_json,
+    cast, diesel_async::AsyncConnection, kubernetes, manifest::render_manifest,
+    pipeline::*, prelude::*, serde_json,
 };
 
 use crate::inputs::input_to_datums;
@@ -62,14 +57,11 @@ pub async fn run_job(
 
     // Insert everthing into the database.
     let job = conn
-        .transaction(|conn| {
-            async move {
-                let job = new_job.insert(conn).await?;
-                NewDatum::insert_all(&new_datums, conn).await?;
-                NewInputFile::insert_all(&new_input_files, conn).await?;
-                Ok::<_, Error>(job)
-            }
-            .scope_boxed()
+        .transaction(async |conn| {
+            let job = new_job.insert(conn).await?;
+            NewDatum::insert_all(&new_datums, conn).await?;
+            NewInputFile::insert_all(&new_input_files, conn).await?;
+            Ok::<_, Error>(job)
         })
         .await?;
 
@@ -111,8 +103,7 @@ pub async fn retry_job(job: &Job, conn: &mut AsyncPgConnection) -> Result<Job> {
     let job_egress_uri = job.egress_uri.clone();
 
     let (pipeline_spec, new_job) = conn
-        .transaction(|conn| {
-            async move {
+        .transaction(async |conn| {
                 // First, fetch our datum status counts, to make sure that this
                 // job has actually finished quieting down. We do this carefully,
                 // with a `match`, to make sure we think about every possible status.
@@ -217,9 +208,7 @@ pub async fn retry_job(job: &Job, conn: &mut AsyncPgConnection) -> Result<Job> {
                 NewInputFile::insert_all(&new_input_files, conn).await?;
 
                 Ok::<_, Error>((pipeline_spec, new_job))
-            }
-            .scope_boxed()
-        })
+            })
         .await?;
 
     // Start a new batch job.

@@ -16,3 +16,4 @@ serde = { version = "1.0.70", features = ["derive"] }
 proptest = "1.11.0"
 tokio = "1.42.0"
 tracing = "0.1.29"
+utoipa = { version = "6", features = ["chrono", "uuid"] }
