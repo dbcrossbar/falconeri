@@ -5,7 +5,8 @@ max_width = 87
 # Switch to short-form field init syntax when possible, for consistency.
 use_field_init_shorthand = true
 
-# Unstable features (require nightly, used by `just sort-imports`)
-unstable_features = true
-group_imports = "StdExternalCrate"
-imports_granularity = "Crate"
+# Nightly-only options (`unstable_features`, `group_imports`,
+# `imports_granularity`) are deliberately NOT listed here: stable `cargo fmt`,
+# which is what `just check` runs, prints a warning for every option it can't
+# use. They are passed on the command line by `just sort-imports` instead, and
+# nightly `--config` values are merged with the stable settings above.

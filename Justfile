@@ -72,9 +72,13 @@ check-clean:
     git diff-index --quiet HEAD --
 
 # Sort and group imports using nightly rustfmt.
-# This groups imports into std/external/local sections and merges imports from the same crate.
 sort-imports:
-    cargo +nightly fmt
+    # Groups imports into std/external/local sections and merges imports from the
+    # same crate. These rustfmt options are nightly-only, so we pass them here
+    # rather than putting them in .rustfmt.toml, where stable `cargo fmt` (see
+    # `just check`) would warn about each one. Nightly unlocks them without
+    # `unstable_features = true`.
+    cargo +nightly fmt -- --config imports_granularity=Crate,group_imports=StdExternalCrate
 
 # PLEASE DO NOT RUN WITHOUT SIGN-OFF FROM emk. This is not a complete set of
 # things that need to be done for a valid release. Some other things:
