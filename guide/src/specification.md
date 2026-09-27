@@ -46,6 +46,70 @@ Use `"/*/path"` when each top-level entry is one unit of work but only part of i
 
 On S3, `"/*"` produces one datum per top-level entry on both flat and nested repos. Older falconeri versions produced one datum per S3 object at any depth, so a nested S3 repo now produces fewer, larger datums than before; flat repos (files only, no subdirectories) are unaffected.
 
+## Combining inputs
+
+The value of `"input"` can be a single `atom`, or any of three *combinators* — `union`, `cross`, and `group` — nested to any depth. Every input evaluates to a set of datums (units of work), and the combinators operate on those datums.
+
+Every datum has a *name*: the contributing atom's `repo`, plus the top-level entry matched by the glob's `*` (a `"/*"` or `"/*/path"` datum for entry `shard7` is named for `shard7`). The combinators combine and match datums by these names. At runtime, all of a datum's files are materialized together on one worker under `/pfs/<repo>/`.
+
+### Union
+
+`union` runs every datum of every child; each child contributes its own datums, unchanged.
+
+```json
+"input": {
+    "union": [
+        { "atom": { "repo": "train", "URI": "gs://b/train-2025/", "glob": "/*" } },
+        { "atom": { "repo": "train", "URI": "gs://b/train-2026/", "glob": "/*" } }
+    ]
+}
+```
+
+Each top-level entry in either bucket becomes one datum. If children share a `repo` name, the entries matched by `*` should be distinct across children — otherwise two children produce datums with the same name, which you usually want to `group` together instead.
+
+### Cross
+
+`cross` produces every pairing of its children's datums, and the worker sees each side of the pairing in its own `/pfs` directory.
+
+```json
+"input": {
+    "cross": [
+        { "atom": { "repo": "subject", "URI": "gs://b/subjects/", "glob": "/*" } },
+        { "atom": { "repo": "model", "URI": "gs://b/models/", "glob": "/*" } }
+    ]
+}
+```
+
+One hundred subjects and three models give 300 datums, each holding `/pfs/subject/<s>` and `/pfs/model/<m>`. Cross multiplies work; keep the product in mind when adding a child.
+
+### Group
+
+`group` merges datums with the *same name* into a single datum, so several sources materialize as one `/pfs` directory. Names are per `repo`, so the standard idiom is to declare *the same repo name over different URIs*:
+
+```json
+"input": {
+    "group": [
+        { "atom": { "repo": "data", "URI": "gs://b/data-1/", "glob": "/*/foo" } },
+        { "atom": { "repo": "data", "URI": "gs://b/data-2/", "glob": "/*/bar" } }
+    ]
+}
+```
+
+Both children use the repo name `data` and produce one datum per matching top-level entry. Where both have an entry `alpha`, the two `alpha` datums merge into one whose directory contains both trees:
+
+```text
+gs://b/data-1/alpha/foo/...   and   gs://b/data-2/alpha/bar/...
+    → /pfs/data/alpha/{foo,bar}
+```
+
+Merging directory trees is the interesting case: two trees land in one directory, as if they had been stored together. The rules:
+
+- **Matching is by name, not URI.** Children with different `repo` names never merge — such a `group` is a legal no-op, but probably not what you meant. Merging across buckets requires declaring one repo name over several URIs.
+- **File clashes are rejected before the job starts.** If two files in one datum would download different URIs to the same local path, `job run` fails immediately rather than letting workers race. Two *directory* trees may share a local directory — that is the point of the merge — but a file named `x` in each tree clashes inside the merged result. Falconeri does not go looking for that case (it would mean listing everything recursively); treat it as last-write-wins and avoid it.
+- An entry matched by only one child still produces a datum, containing just that child's files.
+
+Coming from Pachyderm: falconeri's `group` merges by datum name (repo plus the `*` match), not by a `groupBy` pattern over file paths, and a merged datum materializes as one `/pfs/<repo>/...` tree rather than per-repo `/pfs` trees. To merge the same logical entry across URIs, declare those URIs under one `repo` name.
+
 ## The worker pod failure budget
 
 Kubernetes counts the worker pods that fail, and fails the whole job once the count reaches a budget. This budget is separate from `datum_tries`: `datum_tries` limits the attempts for one datum, while the budget covers every worker pod in the job. A pod that dies mid-datum normally costs one counted pod failure and one of that datum's attempts.
