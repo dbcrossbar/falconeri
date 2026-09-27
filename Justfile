@@ -65,7 +65,7 @@ check:
     cargo fmt -- --check
     cargo deny check
     cargo clippy -- -D warnings
-    cargo test --all
+    cargo test --all --quiet
 
 # Check to make sure our working copy is clean.
 check-clean:
