@@ -17,25 +17,16 @@ allow = [
     "ISC",
     "Zlib",
     "Unicode-3.0",
-    # OpenSSL license is used by aws-lc-sys (via ring/rustls). It's a permissive
-    # license similar to BSD, just with an advertising clause.
-    "OpenSSL",
     # CDLA-Permissive-2.0 is used by webpki-root-certs for Mozilla root CA data.
     # It's a permissive data license appropriate for certificate data.
     "CDLA-Permissive-2.0",
 ]
 
-[[licenses.clarify]]
-# Ring has a messy license.
-name = "ring"
-expression = "ISC AND OpenSSL AND MIT"
-license-files = [
-    { path = "LICENSE", hash = 3171872035 },
-]
-
 [bans]
-# Warn about multiple versions of the same crate, unless we've indicated otherwise below.
-multiple-versions = "warn"
+# In theory it's nice to catch duplicate dependencies, but in practice it
+# provides hundreds of lines warning spam and almost never catches any
+# real issues. We have replaced this with a short list
+multiple-versions = "allow"
 
 deny = [
     # OpenSSL has caused endless deployment and build problems. We use rustls
@@ -43,27 +34,39 @@ deny = [
     # database connections.
     { name = "openssl" },
     { name = "openssl-sys" },
-]
 
-skip = [
-    # handlebars -> derive_builder uses darling 0.20, diesel uses 0.21
-    { name = "darling", version = "0.20" },
-    { name = "darling_core", version = "0.20" },
-    { name = "darling_macro", version = "0.20" },
+    # --- Duplication here is a silent runtime bug, not a compile error. ---
+    #
+    # This list was compiled by a friendly neighborhood LLM based on its
+    # own ambient background knowledge of common silent failures (like
+    # tracing).
+    #
+    # Note that listing a crate here with `deny-multiple-versions` does not ban
+    # the crate itself, it only bans having two versions of it.
 
-    # prettytable-rs -> dirs-next -> redox_users uses thiserror 1.x
-    { name = "thiserror", version = "1" },
-    { name = "thiserror-impl", version = "1" },
-]
+    # The global default dispatcher lives in statics inside tracing-core. With
+    # two copies, code linked against copy B sends spans/events to B's
+    # never-initialized default dispatcher: logs just vanish, no error.
+    { name = "tracing-core", deny-multiple-versions = true },
 
-skip-tree = [
-    # Build-only dependency uses some stale crates.
-    { name = "pest_meta" },
-    # We're never running on top of a real WASI platform, so just ignore it.
-    { name = "wasi" },
-    # ring and prettytable-rs pull in older getrandom via redox_users
-    { name = "getrandom", version = "0.2" },
-    # jni uses windows-sys 0.45; other deps use 0.61; affects Windows only
-    { name = "windows-sys", version = "0.45" },
-    { name = "windows-sys", version = "0.60" },
+    # Same failure mode as tracing-core: one global logger in a static, so a
+    # second copy silently drops everything logged through it.
+    { name = "log", deny-multiple-versions = true },
+
+    # Owns process-global signal state (the shared forwarding pipe + handler).
+    # Two copies means two registries; the OS only remembers one handler, so
+    # e.g. tokio's ctrl_c() can stop firing mysteriously.
+    { name = "signal-hook-registry", deny-multiple-versions = true },
+
+    # Thread-local errno is per-copy: a library sets errno in copy A and reads
+    # it in copy B, and reports the wrong error.
+    { name = "errno", deny-multiple-versions = true },
+
+    # These compile C/asm and export a shared C symbol namespace (`aws_lc_*`,
+    # `ring_*`/`GFp_*`). Two versions still link: the linker just resolves both
+    # Rust wrappers against whichever object file it saw first, i.e. silent ABI
+    # skew inside our crypto backend. This is the one class where a dupe is
+    # undefined behavior rather than a type error.
+    { name = "aws-lc-sys", deny-multiple-versions = true },
+    { name = "ring", deny-multiple-versions = true },
 ]
