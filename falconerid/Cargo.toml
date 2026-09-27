@@ -6,8 +6,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+async-recursion = "1.1.1"
 axum = { version = "0.8", features = ["macros"] }
 falconeri_common = { path = "../falconeri_common" }
+futures.workspace = true
 http = "1"
 serde.workspace = true
 serde_yaml = "0.9"
@@ -17,3 +19,7 @@ tower-http = { version = "0.6", features = ["trace", "limit"] }
 tracing.workspace = true
 utoipa = "5.4.0"
 utoipa-axum = "0.2.0"
+
+[dev-dependencies]
+falconeri_common = { path = "../falconeri_common", features = ["testing"] }
+proptest.workspace = true

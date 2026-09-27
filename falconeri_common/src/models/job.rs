@@ -1,6 +1,6 @@
 use cast;
 use diesel::dsl;
-use diesel_async::{scoped_futures::ScopedFutureExt, AsyncConnection, RunQueryDsl};
+use diesel_async::{AsyncConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
 use serde_json;
 use utoipa::ToSchema;
 

@@ -4,11 +4,11 @@ use std::result;
 
 use axum::{
     extract::FromRequestParts,
-    http::{request::Parts, StatusCode},
+    http::{StatusCode, request::Parts},
     response::{IntoResponse, Response},
 };
 use falconeri_common::{
-    base64::{prelude::BASE64_STANDARD, Engine},
+    base64::{Engine, prelude::BASE64_STANDARD},
     db, diesel,
     models::DatumStateError,
     prelude::*,

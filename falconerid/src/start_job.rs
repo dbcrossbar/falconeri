@@ -4,7 +4,7 @@ use std::cmp::min;
 
 use falconeri_common::{
     cast,
-    diesel_async::{scoped_futures::ScopedFutureExt, AsyncConnection},
+    diesel_async::{AsyncConnection, scoped_futures::ScopedFutureExt},
     kubernetes,
     manifest::render_manifest,
     pipeline::*,

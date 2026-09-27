@@ -1,7 +1,7 @@
 //! The `job list` subcommand.
 
 use falconeri_common::{prelude::*, rest_api::Client};
-use prettytable::{format::consts::FORMAT_CLEAN, row, Table};
+use prettytable::{Table, format::consts::FORMAT_CLEAN, row};
 
 /// The `job list` subcommand.
 #[instrument(level = "trace")]

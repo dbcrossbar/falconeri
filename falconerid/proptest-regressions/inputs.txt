@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 19227d92b451f3464080ff3bf7b639470a1caeaac718a06a530a61c34f61bf57 # shrinks to input_a = InputAndEntries { input: Atom { uri: "memory://a/c", repo: "r1", glob: WholeRepo }, entries: [Object(BucketObject { uri: "memory://a/c/d1/\0keep", size: 0 })] }
+cc bd0096f641e134febbe16e38a275325d7ea681fd3f59ae773c87bf6d3bcec663 # shrinks to input_a = InputAndEntries { input: Cross([Union([Atom { uri: "memory://a/c", repo: "r1", glob: WholeRepo }, Atom { uri: "memory://a/c", repo: "r1", glob: WholeRepo }])]), entries: [] }, input_b = InputAndEntries { input: Union([Atom { uri: "memory://a/e/f", repo: "r2", glob: WholeRepo }, Atom { uri: "memory://b/d", repo: "r2", glob: Subpath("d/e") }]), entries: [Object(BucketObject { uri: "memory://a/e/f/f1", size: 0 }), Object(BucketObject { uri: "memory://a/e/f/f1", size: 0 }), Object(BucketObject { uri: "memory://b/d/w1/d/e/d2/.keep", size: 0 }), Object(BucketObject { uri: "memory://b/d/w1/d/e/d2/.keep", size: 0 })] }

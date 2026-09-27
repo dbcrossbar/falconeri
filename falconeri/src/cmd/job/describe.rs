@@ -52,9 +52,11 @@ fn render_template() {
         error_datums,
     };
 
-    assert!(render_description(DESCRIBE_TEMPLATE, &params)
-        .expect("could not render template")
-        .contains(
-            "Error: Kubernetes marked the job as failed (BackoffLimitExceeded)"
-        ));
+    assert!(
+        render_description(DESCRIBE_TEMPLATE, &params)
+            .expect("could not render template")
+            .contains(
+                "Error: Kubernetes marked the job as failed (BackoffLimitExceeded)"
+            )
+    );
 }

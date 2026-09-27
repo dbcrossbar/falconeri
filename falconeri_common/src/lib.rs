@@ -51,7 +51,7 @@ pub mod prelude {
         path::{Path, PathBuf},
     };
 
-    pub use anyhow::{format_err, Context};
+    pub use anyhow::{Context, format_err};
     pub use chrono::{NaiveDateTime, Utc};
     pub use diesel::{self, prelude::*};
     pub use diesel_async::AsyncPgConnection;
@@ -62,7 +62,7 @@ pub mod prelude {
     };
     pub use uuid::Uuid;
 
-    pub use super::{connect_via::ConnectVia, models::*, Error, Result};
+    pub use super::{Error, Result, connect_via::ConnectVia, models::*};
 }
 
 /// Error type for this crate's functions.

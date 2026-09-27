@@ -3,15 +3,15 @@
 use std::{env, fs::read_to_string};
 
 use anyhow::anyhow;
+use diesel_async::{
+    AsyncConnection, AsyncMigrationHarness,
+    pooled_connection::AsyncDieselConnectionManager,
+};
 pub use diesel_async::{
+    AsyncPgConnection,
     pooled_connection::deadpool::{
         Object as PooledConnection, Pool as AsyncPoolInner,
     },
-    AsyncPgConnection,
-};
-use diesel_async::{
-    pooled_connection::AsyncDieselConnectionManager, AsyncConnection,
-    AsyncMigrationHarness,
 };
 use diesel_migrations::MigrationHarness;
 
@@ -24,7 +24,7 @@ use crate::{
 /// submodule so we can configure warnings.
 #[allow(unused_imports)]
 mod migrations {
-    use diesel_migrations::{embed_migrations, EmbeddedMigrations};
+    use diesel_migrations::{EmbeddedMigrations, embed_migrations};
     pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations");
 }
 

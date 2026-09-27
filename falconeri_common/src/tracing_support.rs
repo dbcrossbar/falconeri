@@ -1,9 +1,9 @@
 //! Support for tracing execution of a program.
 
 use tracing_subscriber::{
-    fmt::{format::FmtSpan, Subscriber},
-    prelude::*,
     EnvFilter,
+    fmt::{Subscriber, format::FmtSpan},
+    prelude::*,
 };
 
 /// Set up the `tracing` library with reasonable options.

@@ -3,15 +3,15 @@
 use std::{collections::HashSet, env};
 
 use axum::{
+    Json, Router,
     extract::{Path, Query},
     http::StatusCode,
     routing::{get, patch, post},
-    Json, Router,
 };
 use falconeri_common::{
     db,
     diesel::BelongingToDsl,
-    diesel_async::{scoped_futures::ScopedFutureExt, AsyncConnection, RunQueryDsl},
+    diesel_async::{AsyncConnection, RunQueryDsl, scoped_futures::ScopedFutureExt},
     falconeri_common_version,
     models::DatumStateError,
     pipeline::PipelineSpec,
