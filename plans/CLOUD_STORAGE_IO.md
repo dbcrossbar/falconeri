@@ -236,3 +236,70 @@ dd if=/dev/zero of=/work/z bs=1M count=2000 oflag=direct   # scratch write ceili
 ```
 
 (`aws s3 cp` uses ~10 concurrent parts by default, so the `-` variant approximates our single stream. Watch ENA/CloudWatch metrics for burst-credit exhaustion.)
+
+## 6. Patch workflow
+
+This section records how this series is being implemented, so future
+sessions (and eventually a project skill) keep the same process.
+
+**Patches.** Linux-kernel-style: one focused thing per patch. Refactor
+patches change no behavior and leave existing tests passing untouched;
+behavior changes never mix with refactors. Each patch compiles and
+passes `just check` on its own. Test-only patches that lock in current
+behavior land *before* the patches that change it.
+
+**jj mechanics.** Start each patch with `jj new`; finish with
+`jj describe`—never `jj commit`, because the working copy stays
+available for review-driven edits. The human may amend any commit
+(message or content), particularly during their conversation turn.
+The harness will not say so, so use `jj log`/`jj diff` if something
+seems to have changed unexpectedly.
+
+**Commit messages.** Use Simple-Technical-English (STE) prose, written for a
+reviewer seeing the patch in isolation. The goal is to speed up human
+comprehension and review, which is our more significant productivity
+bottleneck.
+
+General style rules for commit messages:
+
+- Start with clear motivation—why the change exists—then describe what
+  the patch does, concisely.
+- Explain the goal. Do not enumerate every individual change.
+  A reviewer should understand the reasoning, not just the diff.
+- No incidental history: no process narration, no test-run logs, no
+  “per review” bookkeeping, no record of dead-end designs.
+- Stay succinct. If a paragraph is explaining your work on the patch
+  rather than the patch itself, cut it.
+- End with an `Assisted-by: LLM` trailer.
+
+Here is a rough summary of some key rules from the STE standard, to
+help you. STE was designed for aerospace manuals used in a multilingual
+environment. These are not absolute limits, but guidelines to point you
+towards a prose style that will be easy to read:
+
+- Choose simple, unambiguous vocabulary.
+- Use one instruction per sentence, and one topic per paragraph.
+- Use a maximum of around 25 words per sentence.
+- Use a maximum of 6 sentences per paragraph.
+- Use numbered or vertical lists for complex sequences.
+- Do not omit verbs, subjects or articles to shorten a sentence.
+- Use active voice.
+- Permitted verb forms: infinitive, imperative, simple present, simple
+  past, simple future. Past participle may be used as an adjective.
+
+**Plan updates.** Each patch checks off its §2.5 item in the same
+commit. Caveats and findings that affect *later* patches go into the
+plan, attached to the item they will affect—not in a commit message,
+where a future implementer won't look.
+
+**Test discipline.** Test logic we wrote—arithmetic, branching, error
+propagation, round-trip identity—never constants we chose. Keep tests
+non-vacuous: verify a test actually fails when the behavior breaks
+(mutation-check it) before trusting it. Untested fixes are acceptable
+when honest testing would cost more than it proves; say so in the plan.
+
+**Scope.** Ruthlessly simplify toward the minimum the next patch needs;
+extend later when a real need appears. When a design decision is
+genuinely hard, use the collaborative-design process: explore options,
+surface constraints and findings early, and leave the choices to the
+human.
