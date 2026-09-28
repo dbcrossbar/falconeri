@@ -11,6 +11,8 @@
 //! documented on the [`CloudStorage`](crate::storage::CloudStorage) trait
 //! and in the [`super`] module docs. Read those first.
 
+use std::{path::PathBuf, sync::Arc};
+
 use futures::TryStreamExt;
 use object_store::{
     ObjectStore, ObjectStoreExt, WriteMultipart, path::Path as ObjectPath,
@@ -22,8 +24,9 @@ use tokio::{
 use walkdir::WalkDir;
 
 use super::{
-    check_sync_down_kinds, local_path_is_dir, local_relative_path,
-    object_path_from_uri_path, parse_cloud_storage_uri, path_looks_like_prefix,
+    CloudStorage, CloudStorageForUri, check_sync_down_kinds, local_path_is_dir,
+    local_relative_path, object_path_from_uri_path, parse_cloud_storage_uri,
+    path_looks_like_prefix,
 };
 use crate::prelude::*;
 
@@ -233,6 +236,82 @@ pub(crate) async fn sync_up_dir(
     Ok(())
 }
 
+/// One download in a [`sync_down_all`] batch.
+#[derive(Clone, Debug)]
+pub struct SyncTarget {
+    /// The cloud storage URI to download. The kind-matching rules of
+    /// [`CloudStorage::sync_down`](crate::storage::CloudStorage::sync_down)
+    /// apply: object URIs and prefix URIs must be paired with matching
+    /// local paths.
+    pub uri: String,
+
+    /// Where to write it locally.
+    pub local_path: PathBuf,
+}
+
+/// Download a batch of targets, using a single resolver.
+///
+/// This is the worker's input-download path, lifted out of the worker so
+/// that a pod can build **one** resolver for its lifetime instead of one
+/// per file. Behavior notes:
+///
+/// - Every target is validated (URI parse plus kind match) before
+///   anything touches the filesystem, so a bad late target leaves the
+///   work dir untouched rather than half-populated.
+/// - Storage is resolved once per distinct bucket, up front, so
+///   credential problems also surface before we start writing.
+/// - Downloads are still sequential; inter-object concurrency is
+///   deliberately postponed (see `plans/CLOUD_STORAGE_IO.md` §3).
+/// - Every failure is wrapped with the target that caused it.
+pub async fn sync_down_all<R: CloudStorageForUri + ?Sized>(
+    resolver: &mut R,
+    targets: &[SyncTarget],
+) -> Result<()> {
+    // Validate every target before touching the filesystem. `sync_down`
+    // checks these too, but only per-target and only after earlier
+    // targets have already been downloaded.
+    for target in targets {
+        let (_, _, key) = parse_cloud_storage_uri(&target.uri)
+            .with_context(|| format!("invalid sync target URI {}", target.uri))?;
+        check_sync_down_kinds(
+            &target.uri,
+            path_looks_like_prefix(key),
+            &target.local_path,
+        )?;
+    }
+
+    // Resolve one storage backend per distinct bucket, up front.
+    let mut stores: HashMap<String, Arc<dyn CloudStorage>> = HashMap::new();
+    for target in targets {
+        let (_, bucket, _) = parse_cloud_storage_uri(&target.uri)?;
+        if !stores.contains_key(bucket) {
+            let storage = resolver.for_uri(&target.uri).await.with_context(|| {
+                format!("cannot resolve storage backend for {}", target.uri)
+            })?;
+            stores.insert(bucket.to_owned(), storage);
+        }
+    }
+
+    // Download, sequentially for now (see the note above).
+    for target in targets {
+        let (_, bucket, _) = parse_cloud_storage_uri(&target.uri)?;
+        let storage = stores
+            .get(bucket)
+            .expect("every target bucket was resolved above");
+        sync_down(storage.store(), &target.uri, &target.local_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "error downloading {} to {}",
+                    target.uri,
+                    target.local_path.display(),
+                )
+            })?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod test {
     use assert_fs::{TempDir, prelude::*};
@@ -240,8 +319,8 @@ mod test {
 
     use super::*;
     use crate::storage::{
-        CloudStorage,
-        mem::MemoryStorage,
+        BucketObject, CloudStorage,
+        mem::{MemoryStorage, MemoryStorageResolver},
         test_util::{file_contents, fixture, object, prefix, prefix_entries, sorted},
     };
 
@@ -378,6 +457,93 @@ mod test {
                 .await
                 .is_err(),
             "an object URI is not a prefix to upload into"
+        );
+
+        Ok(())
+    }
+
+    /// `sync_down_all` downloads every target through one resolver,
+    /// creating parent directories just like `sync_down`.
+    #[tokio::test]
+    async fn test_sync_down_all() -> Result<()> {
+        let mut resolver = MemoryStorageResolver::default();
+        resolver
+            .populate(&[
+                BucketObject::from_uri_for_test("memory://bucket/a.txt", 1),
+                BucketObject::from_uri_for_test("memory://bucket/deep/b.txt", 1),
+            ])
+            .await?;
+        let dir = TempDir::new()?;
+
+        sync_down_all(
+            &mut resolver,
+            &[
+                SyncTarget {
+                    uri: "memory://bucket/a.txt".to_owned(),
+                    local_path: dir.path().join("a.txt"),
+                },
+                SyncTarget {
+                    uri: "memory://bucket/deep/b.txt".to_owned(),
+                    local_path: dir.path().join("nested/b.txt"),
+                },
+            ],
+        )
+        .await?;
+
+        dir.child("a.txt").assert(file_contents("x"));
+        dir.child("nested/b.txt").assert(file_contents("x"));
+
+        Ok(())
+    }
+
+    /// A bad target is rejected before *anything* is written, so the
+    /// work dir is never left half-populated, and the failure names the
+    /// target that caused it.
+    #[tokio::test]
+    async fn test_sync_down_all_fails_before_writing() -> Result<()> {
+        let mut resolver = MemoryStorageResolver::default();
+        resolver
+            .populate(&[BucketObject::from_uri_for_test("memory://bucket/a.txt", 1)])
+            .await?;
+        let dir = TempDir::new()?;
+
+        // The second target violates the kind rules (a prefix URI with a
+        // non-directory local path), which must be caught before the
+        // first target is downloaded.
+        let err = sync_down_all(
+            &mut resolver,
+            &[
+                SyncTarget {
+                    uri: "memory://bucket/a.txt".to_owned(),
+                    local_path: dir.path().join("a.txt"),
+                },
+                SyncTarget {
+                    uri: "memory://bucket/deep/".to_owned(),
+                    local_path: dir.path().join("no-slash"),
+                },
+            ],
+        )
+        .await
+        .expect_err("a kind mismatch late in the batch must fail the batch");
+        assert!(
+            format!("{err:#}").contains("memory://bucket/deep/"),
+            "the error should name the offending target, got {err:#}"
+        );
+        dir.child("a.txt").assert(predicate::path::missing());
+
+        // A failed download also names its target.
+        let err = sync_down_all(
+            &mut resolver,
+            &[SyncTarget {
+                uri: "memory://bucket/gone.txt".to_owned(),
+                local_path: dir.path().join("gone.txt"),
+            }],
+        )
+        .await
+        .expect_err("a missing object must fail the batch");
+        assert!(
+            format!("{err:#}").contains("memory://bucket/gone.txt"),
+            "the error should name the offending target, got {err:#}"
         );
 
         Ok(())

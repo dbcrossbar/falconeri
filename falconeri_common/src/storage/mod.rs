@@ -93,9 +93,18 @@ pub mod gs;
 pub mod mem;
 pub mod s3;
 
-/// Streaming file transfers between buckets and the local filesystem, which
-/// back [`CloudStorage::sync_down`] and [`CloudStorage::sync_up_dir`].
+/// Streaming file transfers between buckets and the local filesystem.
+///
+/// This backs [`CloudStorage::sync_down`] and
+/// [`CloudStorage::sync_up_dir`], and adds [`sync::sync_down_all`], a
+/// batch download entry point for callers (like the worker) which hold a
+/// [`CloudStorageForUri`] resolver rather than a single bucket.
 mod sync;
+
+// `sync` is an implementation detail; batch downloads are reached through
+// the [`CloudStorageForUri::sync_down_all`] default method, but callers
+// still need to name the targets.
+pub use sync::SyncTarget;
 
 /// Testing: helpers shared by the storage unit tests.
 #[cfg(test)]
@@ -387,6 +396,17 @@ pub trait CloudStorageForUri: Send + Sync {
     /// and the storage driver can check to see if there are any secrets it can
     /// use to authenticate.
     async fn for_uri(&mut self, bucket_uri: &str) -> Result<Arc<dyn CloudStorage>>;
+
+    /// Download a batch of targets, resolving each bucket through
+    /// [`Self::for_uri`].
+    ///
+    /// Validation and resolution order (everything validated and resolved
+    /// before anything is written, one backend per distinct bucket, every
+    /// failure naming its target) are specified by
+    /// [`sync::sync_down_all`], which this delegates to.
+    async fn sync_down_all(&mut self, targets: &[SyncTarget]) -> Result<()> {
+        sync::sync_down_all(self, targets).await
+    }
 }
 
 /// Given a URL, return a real, network-backed [`CloudStorage`] implementation
