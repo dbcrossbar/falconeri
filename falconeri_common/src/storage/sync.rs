@@ -15,7 +15,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use futures::TryStreamExt;
 use object_store::{
-    ObjectStore, ObjectStoreExt, WriteMultipart, path::Path as ObjectPath,
+    ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart, path::Path as ObjectPath,
 };
 use tokio::{
     fs as async_fs,
@@ -66,19 +66,64 @@ pub(crate) async fn stream_download_to_file(
     Ok(())
 }
 
-/// Stream an upload from a local file to the object store.
+/// Largest local file we upload with a single `put` request.
 ///
-/// This uses multipart upload to stream the data in chunks to avoid loading
-/// entire files (which may be 60GB+) into memory.
-pub(crate) async fn stream_upload_from_file(
+/// This is the minimum multipart part size that S3 and GCS allow. Larger files
+/// go to [`stream_upload_from_file`], which streams them without buffering.
+const PUT_MAX_SIZE: u64 = 5 * 1024 * 1024;
+
+/// Upload a local file to the object store, choosing the request shape by
+/// file size.
+///
+/// Files at or below [`PUT_MAX_SIZE`], empty files included, are uploaded
+/// whole with a single `put`. Everything larger is streamed as a multipart
+/// upload.
+pub(crate) async fn upload_file(
     store: &dyn ObjectStore,
     local_path: &Path,
     object_path: &ObjectPath,
 ) -> Result<()> {
-    let file = async_fs::File::open(local_path).await.with_context(|| {
+    let mut file = async_fs::File::open(local_path).await.with_context(|| {
         format!("cannot open local file: {}", local_path.display())
     })?;
+    let size = file
+        .metadata()
+        .await
+        .with_context(|| format!("cannot stat local file: {}", local_path.display()))?
+        .len();
 
+    if size > PUT_MAX_SIZE {
+        return stream_upload_from_file(store, file, local_path, object_path).await;
+    }
+
+    // We know the file is small enough to hold in memory (see
+    // PUT_MAX_SIZE). A file that grows between the stat above and the read
+    // below is simply uploaded whole, which is still correct.
+    let capacity = usize::try_from(size)
+        .with_context(|| format!("cannot buffer {size} bytes into memory"))?;
+    let mut buf = Vec::with_capacity(capacity);
+    file.read_to_end(&mut buf)
+        .await
+        .with_context(|| format!("error reading file: {}", local_path.display()))?;
+
+    store
+        .put(object_path, PutPayload::from(buf))
+        .await
+        .map(|_result| ())
+        .with_context(|| format!("error putting object: {}", object_path.as_ref()))
+}
+
+/// Stream an upload from an open local file, as a multipart upload.
+///
+/// This streams the data in chunks to avoid loading entire files (which may
+/// be 60GB+) into memory. Callers should go through [`upload_file`], which
+/// picks between this and a single `put`.
+pub(crate) async fn stream_upload_from_file(
+    store: &dyn ObjectStore,
+    file: async_fs::File,
+    local_path: &Path,
+    object_path: &ObjectPath,
+) -> Result<()> {
     let upload = store.put_multipart(object_path).await.with_context(|| {
         format!("error starting multipart upload: {}", object_path)
     })?;
@@ -235,7 +280,7 @@ pub(crate) async fn sync_up_dir(
             object_path = object_path.join(object_store::path::PathPart::from(name));
         }
 
-        stream_upload_from_file(store, file_path, &object_path)
+        upload_file(store, file_path, &object_path)
             .await
             .with_context(|| {
                 format!("error uploading to cloud bucket: {}", object_path.as_ref())
@@ -328,9 +373,12 @@ mod test {
     use assert_fs::{TempDir, prelude::*};
     use predicates::prelude::*;
 
+    use object_store::memory::InMemory;
+
     use super::*;
     use crate::storage::{
         BucketObject, CloudStorage,
+        injector::{CallKind, ObjectStoreFaultInjector},
         mem::{MemoryStorage, MemoryStorageResolver},
         test_util::{file_contents, fixture, object, prefix, prefix_entries, sorted},
     };
@@ -560,6 +608,98 @@ mod test {
         Ok(())
     }
 
+    /// Make sure we use the right kind of request for our file size.
+    ///
+    /// The reasoning behind this is a little complicated:
+    ///
+    /// - Some cloud stores will fail if we try to upload 0-byte files
+    ///   via a streaming API.
+    /// - [`object_store`] will work around this transparently, but may
+    ///   need a bunch of API calls to do so. This costs network bandwidth
+    ///   and time, and may count against throughput quota.
+    /// - So if we _can_ upload a small file in a single `put`, we should
+    ///   do so. Streaming should be reserved for larger files.
+    ///
+    /// So we use our call injector to verify our actual call sequence,
+    /// to make sure we're doing this the efficient way, and not resorting
+    /// to more expensive fallback paths.
+    #[tokio::test]
+    async fn test_sync_up_dir_picks_upload_path_by_size() -> Result<()> {
+        let one_part =
+            usize::try_from(PUT_MAX_SIZE).expect("chunk size fits in usize");
+        for (name, len, expect_put) in [
+            ("empty.bin", 0, true),
+            ("small.bin", 1024, true),
+            // Exactly one part's worth, so a single `put` still does all
+            // the work multipart could have done.
+            ("one-part.bin", one_part, true),
+            // One byte more cannot fit in a single part.
+            ("two-parts.bin", one_part + 1, false),
+        ] {
+            let src = TempDir::new()?;
+            src.child("tree/f.bin")
+                .write_binary(&vec![0xAB; len])
+                .with_context(|| format!("{name}: cannot write fixture"))?;
+
+            let injector = ObjectStoreFaultInjector::new(InMemory::default());
+            sync_up_dir(&injector, &src.path().join("tree/"), "memory://bucket/up/")
+                .await
+                .with_context(|| format!("{name}: upload failed"))?;
+
+            let calls = injector.calls();
+            if expect_put {
+                assert_eq!(
+                    calls,
+                    vec![CallKind::Put],
+                    "{name}: expected exactly one put and no multipart handshake, got {calls:?}",
+                );
+            } else {
+                assert_eq!(
+                    calls.first(),
+                    Some(&CallKind::PutMultipart),
+                    "{name}: expected a multipart upload, got {calls:?}",
+                );
+                assert_eq!(
+                    calls.last(),
+                    Some(&CallKind::Complete),
+                    "{name}: expected the multipart upload to be completed, got {calls:?}",
+                );
+                assert!(
+                    calls.iter().all(|c| {
+                        matches!(
+                            c,
+                            CallKind::PutMultipart
+                                | CallKind::PutPart
+                                | CallKind::Complete
+                        )
+                    }),
+                    "{name}: expected only multipart calls, got {calls:?}",
+                );
+                assert!(
+                    injector.called(CallKind::PutPart),
+                    "{name}: expected at least one part, got {calls:?}",
+                );
+            }
+
+            // Whichever branch ran, the object must hold exactly the bytes
+            // we wrote, under the key we expect. Reading through `inner()`
+            // is not recorded, so it leaves the log above alone.
+            let stored = injector
+                .inner()
+                .get(&ObjectPath::from("up/f.bin"))
+                .await
+                .with_context(|| format!("{name}: object is missing"))?
+                .bytes()
+                .await?;
+            assert!(
+                stored.len() == len && stored.iter().all(|b| *b == 0xAB),
+                "{name}: stored object should have the same length as the source file",
+            );
+        }
+
+        Ok(())
+    }
+
     /// Collect every regular file under `root` as `(relative path,
     /// bytes)`, for byte-for-byte tree comparisons.
     fn collect_tree(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
@@ -688,14 +828,11 @@ mod test {
     /// `.keep` object, since object stores have no directories) round
     /// trip through memory.
     ///
-    /// This documents intent; it is explicitly _not_ proof that
-    /// empty-file uploads work against real services. It passes today
-    /// only because `InMemory` is too permissive: a zero-byte file
-    /// fills no chunk buffer, and `InMemory` happily completes a
-    /// multipart upload with zero parts—which real S3 and GCS reject
-    /// (CS-4). The env-gated MinIO test planned in
-    /// `plans/CLOUD_STORAGE_IO.md` §2.4-D is what will actually prove
-    /// that.
+    /// This documents intent; it is explicitly _not_ proof that empty-file
+    /// uploads are legal against real services. `InMemory` accepts any
+    /// request, including a multipart completion with zero parts, which the
+    /// S3 and GCS APIs reject. Request legality is what the env-gated MinIO
+    /// test in `plans/CLOUD_STORAGE_IO.md` §2.4-D is for.
     #[tokio::test]
     async fn test_sync_round_trip_empty_file_and_dir() -> Result<()> {
         let src = TempDir::new()?;
