@@ -91,6 +91,11 @@ pub mod gs;
 /// enabled.
 #[cfg(any(test, feature = "testing"))]
 pub mod mem;
+
+/// Testing: bare-bones fault-injecting `ObjectStore`, for exercising
+/// error paths that `InMemory` can never produce.
+#[cfg(any(test, feature = "testing"))]
+pub mod injector;
 pub mod s3;
 
 /// Streaming file transfers between buckets and the local filesystem.
