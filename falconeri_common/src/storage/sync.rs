@@ -314,6 +314,8 @@ pub async fn sync_down_all<R: CloudStorageForUri + ?Sized>(
 
 #[cfg(test)]
 mod test {
+    use std::collections::BTreeMap;
+
     use assert_fs::{TempDir, prelude::*};
     use predicates::prelude::*;
 
@@ -544,6 +546,173 @@ mod test {
         assert!(
             format!("{err:#}").contains("memory://bucket/gone.txt"),
             "the error should name the offending target, got {err:#}"
+        );
+
+        Ok(())
+    }
+
+    /// Collect every regular file under `root` as `(relative path,
+    /// bytes)`, for byte-for-byte tree comparisons.
+    fn collect_tree(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
+        let mut files = BTreeMap::new();
+        for entry in WalkDir::new(root) {
+            let entry =
+                entry.with_context(|| format!("error walking {}", root.display()))?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let relative = entry.path().strip_prefix(root).with_context(|| {
+                format!("{} is not under {}", entry.path().display(), root.display(),)
+            })?;
+            files.insert(
+                relative.to_path_buf(),
+                std::fs::read(entry.path()).with_context(|| {
+                    format!("cannot read {}", entry.path().display())
+                })?,
+            );
+        }
+        Ok(files)
+    }
+
+    /// A local tree, uploaded with `sync_up_dir` and downloaded again
+    /// with `sync_down`, must come back byte-identical—including the
+    /// names. This is the round trip over the "two worlds of text"
+    /// boundary (literal local names vs percent-encoded keys, see the
+    /// [`super`] module docs), so it covers every name that needs
+    /// encoding or could be double-encoded: spaces, `%`, `#`, text that
+    /// already looks escaped, unicode, dot-files, and deep nesting.
+    #[tokio::test]
+    async fn test_sync_round_trip_nasty_names() -> Result<()> {
+        let src = TempDir::new()?;
+        let files: &[(&str, &str)] = &[
+            ("plain.txt", "plain"),
+            ("with spaces.txt", "spaces"),
+            ("100%.txt", "percent"),
+            ("hash#tag.txt", "hash"),
+            // Looks like an encoded '/' but is literal text; encoding
+            // must escape the '%' and decoding must restore it exactly.
+            ("pre%2Fescaped.txt", "already escaped"),
+            ("日本語/第1階層/ファイル.txt", "unicode"),
+            ("emoji-🎉.txt", "emoji"),
+            (".keep", "root dotfile"),
+            ("dotted/.keep", "directory dotfile"),
+            ("deep/a/b/c/d/e/f/g/leaf.txt", "deep"),
+        ];
+        for (name, contents) in files {
+            src.child(format!("tree/{name}")).write_str(contents)?;
+        }
+
+        let storage = MemoryStorage::new("bucket");
+        storage
+            .sync_up_dir(&src.path().join("tree/"), &storage.bucket_uri())
+            .await?;
+
+        let down = TempDir::new()?;
+        storage
+            .sync_down(&storage.bucket_uri(), &down.path().join("tree/"))
+            .await?;
+
+        let down_tree = collect_tree(&down.path().join("tree"))?;
+        assert_eq!(
+            down_tree.len(),
+            files.len(),
+            "the download should hold exactly one file per source file, not zero",
+        );
+        assert_eq!(
+            collect_tree(&src.path().join("tree"))?,
+            down_tree,
+            "the round trip should be byte-identical, names and contents",
+        );
+
+        Ok(())
+    }
+
+    /// The same round trip at scale, asserting **exact set equality**.
+    /// "Silently dropped one file in 5,000" is precisely the class of
+    /// bug we risk shipping when the concurrent fan-out lands (see
+    /// `plans/CLOUD_STORAGE_IO.md` §3), so this test is deliberately in
+    /// place before any transfer-code changes.
+    #[tokio::test]
+    async fn test_sync_round_trip_many_objects() -> Result<()> {
+        const DIRS: u32 = 25;
+        const SUBDIRS: u32 = 10;
+        const FILES: u32 = 10; // 2,500 files total.
+
+        let src = TempDir::new()?;
+        for dir in 0..DIRS {
+            for subdir in 0..SUBDIRS {
+                for file in 0..FILES {
+                    let name = format!("tree/d{dir:02}/s{subdir}/f{file:02}.dat");
+                    // Each file's contents name its own path, so a
+                    // misfiled object cannot accidentally match.
+                    src.child(&name).write_str(&name)?;
+                }
+            }
+        }
+
+        let storage = MemoryStorage::new("bucket");
+        storage
+            .sync_up_dir(&src.path().join("tree/"), &storage.bucket_uri())
+            .await?;
+
+        let down = TempDir::new()?;
+        storage
+            .sync_down(&storage.bucket_uri(), &down.path().join("tree/"))
+            .await?;
+
+        let expected = collect_tree(&src.path().join("tree"))?;
+        let actual = collect_tree(&down.path().join("tree"))?;
+        assert_eq!(
+            expected.len(),
+            (DIRS * SUBDIRS * FILES) as usize,
+            "fixture sanity: the source tree itself should hold every generated file",
+        );
+        assert_eq!(
+            expected, actual,
+            "exact set equality (paths and bytes), not just 'a lot of files made it'",
+        );
+
+        Ok(())
+    }
+
+    /// Empty files and "empty" directories (which only survive as a
+    /// `.keep` object, since object stores have no directories) round
+    /// trip through memory.
+    ///
+    /// This documents intent; it is explicitly _not_ proof that
+    /// empty-file uploads work against real services. It passes today
+    /// only because `InMemory` is too permissive: a zero-byte file
+    /// fills no chunk buffer, and `InMemory` happily completes a
+    /// multipart upload with zero parts—which real S3 and GCS reject
+    /// (CS-4). The env-gated MinIO test planned in
+    /// `plans/CLOUD_STORAGE_IO.md` §2.4-D is what will actually prove
+    /// that.
+    #[tokio::test]
+    async fn test_sync_round_trip_empty_file_and_dir() -> Result<()> {
+        let src = TempDir::new()?;
+        src.child("tree/empty.bin").write_str("")?;
+        src.child("tree/emptish/.keep").write_str("")?;
+
+        let storage = MemoryStorage::new("bucket");
+        storage
+            .sync_up_dir(&src.path().join("tree/"), &storage.bucket_uri())
+            .await?;
+
+        let down = TempDir::new()?;
+        storage
+            .sync_down(&storage.bucket_uri(), &down.path().join("tree/"))
+            .await?;
+
+        let down_tree = collect_tree(&down.path().join("tree"))?;
+        assert_eq!(
+            down_tree.len(),
+            2,
+            "both the empty file and the directory's .keep should come back",
+        );
+        assert_eq!(
+            collect_tree(&src.path().join("tree"))?,
+            down_tree,
+            "empty files and dotfile-backed directories should round trip",
         );
 
         Ok(())
