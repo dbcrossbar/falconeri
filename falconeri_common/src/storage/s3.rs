@@ -3,9 +3,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use object_store::{ObjectStore, aws::AmazonS3Builder};
+use object_store::{
+    ClientConfigKey, ObjectStore,
+    aws::{AmazonS3Builder, AmazonS3ConfigKey},
+};
 
-use super::CloudStorage;
+use super::{CloudStorage, StorageClientPolicy};
 use crate::{
     kubernetes::{
         base64_encoded_optional_secret_string, base64_encoded_secret_string,
@@ -83,6 +86,7 @@ impl S3Storage {
         // AWS_ENDPOINT_URL, and AWS_REGION from environment variables.
         let mut builder = AmazonS3Builder::from_env()
             .with_bucket_name(bucket)
+            .with_storage_timeouts()
             .with_allow_http(true);
 
         if let Some(ref secret) = secret_data {
@@ -105,6 +109,12 @@ impl S3Storage {
             store: Arc::new(store),
             bucket: bucket.to_owned(),
         })
+    }
+}
+
+impl StorageClientPolicy for AmazonS3Builder {
+    fn client_option(self, key: ClientConfigKey, value: &'static str) -> Self {
+        self.with_config(AmazonS3ConfigKey::Client(key), value)
     }
 }
 
