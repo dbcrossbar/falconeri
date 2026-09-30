@@ -15,11 +15,13 @@ use std::{path::PathBuf, sync::Arc};
 
 use futures::TryStreamExt;
 use object_store::{
-    ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart, path::Path as ObjectPath,
+    MultipartUpload, ObjectStore, ObjectStoreExt, PutPayload, PutResult,
+    WriteMultipart, path::Path as ObjectPath,
 };
 use tokio::{
     fs as async_fs,
     io::{AsyncReadExt, AsyncWriteExt},
+    runtime::Handle,
 };
 use walkdir::WalkDir;
 
@@ -166,6 +168,90 @@ pub(crate) async fn upload_file(
 /// part buffer while we read the next part from disk.
 const UPLOAD_PART_CONCURRENCY: usize = 2;
 
+/// A live multipart upload that aborts itself if dropped unfinished.
+///
+/// A transfer can stop at any await: a read error, a failed part, a
+/// timeout, or a canceled job. If the upload drops unfinished, the
+/// server keeps the parts already uploaded, and bills them until
+/// something aborts. `WriteMultipart` aborts only inside `finish`;
+/// this guard covers every path that never reaches it.
+///
+/// `Drop` cannot await, so the drop paths spawn the abort request as a
+/// detached task on the runtime handle captured here. The remaining
+/// gaps—the upload is already past the guard when cancellation hits
+/// (inside `finish`), the runtime dies before the detached task runs,
+/// or the process dies—leave only a bucket lifecycle rule that aborts
+/// stale incomplete uploads as the cleanup that works.
+struct MultipartUploadGuard {
+    /// `None` only after [`Self::finish`] took it.
+    upload: Option<WriteMultipart>,
+    /// Captured in async context, so `Drop` can spawn without calling
+    /// `Handle::current` outside a runtime.
+    handle: Handle,
+    /// For log messages, after the upload moves into the detached task.
+    object_path: ObjectPath,
+}
+
+impl MultipartUploadGuard {
+    fn new(
+        upload: Box<dyn MultipartUpload>,
+        part_size: usize,
+        object_path: &ObjectPath,
+    ) -> Self {
+        Self {
+            upload: Some(WriteMultipart::new_with_chunk_size(upload, part_size)),
+            handle: Handle::current(),
+            object_path: object_path.clone(),
+        }
+    }
+
+    /// See [`WriteMultipart::write`].
+    fn write(&mut self, buf: &[u8]) {
+        self.live().write(buf);
+    }
+
+    /// See [`WriteMultipart::wait_for_capacity`].
+    async fn wait_for_capacity(&mut self, max_concurrency: usize) -> Result<()> {
+        Ok(self.live().wait_for_capacity(max_concurrency).await?)
+    }
+
+    /// Flush the last part and complete the upload. Consuming the guard
+    /// disarms the abort; a failed part or completion aborts inside
+    /// [`WriteMultipart::finish`] before this returns `Err`.
+    async fn finish(mut self) -> Result<PutResult> {
+        let upload = self
+            .upload
+            .take()
+            .expect("finish consumes the guard, so it runs exactly once");
+        Ok(upload.finish().await?)
+    }
+
+    fn live(&mut self) -> &mut WriteMultipart {
+        self.upload
+            .as_mut()
+            .expect("the upload lives until finish() takes it")
+    }
+}
+
+impl Drop for MultipartUploadGuard {
+    fn drop(&mut self) {
+        let Some(upload) = self.upload.take() else {
+            return;
+        };
+        let object_path = self.object_path.clone();
+        self.handle.spawn(async move {
+            match upload.abort().await {
+                Ok(()) => debug!("aborted incomplete multipart upload: {object_path}"),
+                Err(e) => warn!(
+                    "failed to abort incomplete multipart upload {object_path}: {e}; \
+                     its parts stay on the server until a bucket lifecycle rule \
+                     aborts them",
+                ),
+            }
+        });
+    }
+}
+
 /// Stream an upload from an open local file, as a multipart upload.
 ///
 /// `size` is the file size reported by the caller. We stream the data in
@@ -192,7 +278,7 @@ pub(crate) async fn stream_upload_from_file(
         format!("error starting multipart upload: {}", object_path)
     })?;
 
-    let mut write = WriteMultipart::new_with_chunk_size(upload, part_size);
+    let mut write = MultipartUploadGuard::new(upload, part_size, object_path);
     let mut buf = vec![0u8; part_size];
 
     // Read one part at a time, so each write hands `WriteMultipart` exactly
@@ -1116,6 +1202,94 @@ mod test {
         assert!(
             format!("{err:#}").contains("locked"),
             "the error should name the offending path, got {err:#}",
+        );
+
+        Ok(())
+    }
+
+    /// Poll `done` for about one second. For effects that land on a
+    /// detached task, which can finish just after the call that
+    /// spawned them returns.
+    async fn poll_until(done: impl Fn() -> bool) -> bool {
+        for _ in 0..100 {
+            if done() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        done()
+    }
+
+    /// A file large enough for three multipart parts, so the read
+    /// loop still has a next iteration—where `wait_for_capacity`
+    /// reports a failed part—after the faults fire.
+    fn three_part_file(dir: &TempDir) -> Result<assert_fs::fixture::ChildPath> {
+        let part =
+            usize::try_from(DEFAULT_PART_SIZE).expect("part size fits in usize");
+        let child = dir.child("big.bin");
+        child.write_binary(&vec![0u8; 2 * part + 1])?;
+        Ok(child)
+    }
+
+    /// A part failure mid-upload must reach `abort()` on the store,
+    /// not leave an incomplete multipart upload whose parts bill until
+    /// someone cleans them up.
+    ///
+    /// Two part faults are armed, not one: `wait_for_capacity` only
+    /// inspects in-flight parts when it must wait, and reports
+    /// whichever finishes first, so a single fault could slip past it
+    /// and surface only inside `finish()`. That would prove
+    /// `object_store`'s own cleanup, not our guard's drop path.
+    #[tokio::test]
+    async fn test_failed_multipart_upload_aborts() -> Result<()> {
+        let injector = ObjectStoreFaultInjector::new(InMemory::default());
+        let dir = TempDir::new()?;
+        let file = three_part_file(&dir)?;
+
+        injector.fail_nth(CallKind::PutPart, 1);
+        injector.fail_nth(CallKind::PutPart, 2);
+
+        let err = upload_file(&injector, file.path(), &ObjectPath::from("big.bin"))
+            .await
+            .expect_err("the injected part failures must fail the upload");
+        assert!(
+            format!("{err:#}").contains("big.bin"),
+            "the error should name the object, got {err:#}",
+        );
+
+        assert!(
+            poll_until(|| injector.called(CallKind::Abort)).await,
+            "a failed upload must abort the multipart upload, got {:?}",
+            injector.calls(),
+        );
+
+        Ok(())
+    }
+
+    /// The other half of the guard contract: `finish()` consumes the
+    /// guard, so a successful upload completes and never aborts.
+    #[tokio::test]
+    async fn test_successful_upload_does_not_abort() -> Result<()> {
+        let injector = ObjectStoreFaultInjector::new(InMemory::default());
+        let dir = TempDir::new()?;
+        let file = three_part_file(&dir)?;
+
+        upload_file(&injector, file.path(), &ObjectPath::from("big.bin")).await?;
+
+        assert_eq!(
+            injector.calls().last(),
+            Some(&CallKind::Complete),
+            "the multipart upload should complete, got {:?}",
+            injector.calls(),
+        );
+
+        // Give a wrongly-spawned detached abort a chance to land
+        // before asserting it is absent.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !injector.called(CallKind::Abort),
+            "a completed upload must not be aborted, got {:?}",
+            injector.calls(),
         );
 
         Ok(())
