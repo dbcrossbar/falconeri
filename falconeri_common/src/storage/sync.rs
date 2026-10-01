@@ -66,11 +66,50 @@ pub(crate) async fn stream_download_to_file(
     Ok(())
 }
 
+const MIB: u64 = 1024 * 1024;
+const GIB: u64 = 1024 * MIB;
+
+/// Largest part that S3 and GCS accept in a multipart upload.
+const MAX_PART_SIZE: u64 = 5 * GIB;
+
+/// Most parts that S3 and GCS accept in one multipart upload.
+const MAX_PARTS: u64 = 10_000;
+
+/// Part size we start with, before a file is large enough to force bigger
+/// parts. S3 and GCS accept parts of 5 MiB or more, so this is our choice, not
+/// a service limit.
+///
+/// Every part is a billable write request, and a job uploads through one
+/// output prefix, so part count costs us money and request-rate headroom. At
+/// about 100 MiB/s per pod, 5 MiB parts would take 20 requests per second per
+/// pod; 16 MiB parts take 6. The price is one 16 MiB buffer per in-flight
+/// part, which is small next to the pod memory budget, and the part window
+/// only has to cover bandwidth times round trip time, about 3 MiB.
+const DEFAULT_PART_SIZE: u64 = 16 * MIB;
+
 /// Largest local file we upload with a single `put` request.
 ///
-/// This is the minimum multipart part size that S3 and GCS allow. Larger files
+/// A file this size or smaller can never produce more than one multipart part,
+/// so a single `put` does the same work for two fewer requests. Larger files
 /// go to [`stream_upload_from_file`], which streams them without buffering.
-const PUT_MAX_SIZE: u64 = 5 * 1024 * 1024;
+const PUT_MAX_SIZE: u64 = DEFAULT_PART_SIZE;
+
+/// Part size to use for a multipart upload of an object `size` bytes long.
+/// `object_store` calls this the chunk size.
+///
+/// S3 and GCS allow at most [`MAX_PARTS`] parts, each of at most
+/// [`MAX_PART_SIZE`], so a big file needs `ceil(size / MAX_PARTS)`. We take
+/// that, clamped to at least [`DEFAULT_PART_SIZE`] and at most
+/// [`MAX_PART_SIZE`].
+///
+/// Above `MAX_PARTS * MAX_PART_SIZE`, about 48.8 TiB, no legal part size
+/// exists. We still answer with the ceiling, and the service rejects the
+/// upload. GCS caps objects at 5 TiB, which is lower, but that limit belongs
+/// to the backend, and this function does not know which backend it feeds.
+fn multipart_part_size(size: u64) -> u64 {
+    size.div_ceil(MAX_PARTS)
+        .clamp(DEFAULT_PART_SIZE, MAX_PART_SIZE)
+}
 
 /// Upload a local file to the object store, choosing the request shape by
 /// file size.
@@ -93,7 +132,8 @@ pub(crate) async fn upload_file(
         .len();
 
     if size > PUT_MAX_SIZE {
-        return stream_upload_from_file(store, file, local_path, object_path).await;
+        return stream_upload_from_file(store, file, size, local_path, object_path)
+            .await;
     }
 
     // We know the file is small enough to hold in memory (see
@@ -115,34 +155,45 @@ pub(crate) async fn upload_file(
 
 /// Stream an upload from an open local file, as a multipart upload.
 ///
-/// This streams the data in chunks to avoid loading entire files (which may
-/// be 60GB+) into memory. Callers should go through [`upload_file`], which
-/// picks between this and a single `put`.
+/// `size` is the file size reported by the caller. We stream the data in
+/// parts, so an object of any size uploads without loading it whole into
+/// memory. Callers should go through [`upload_file`], which picks between this
+/// and a single `put`.
 pub(crate) async fn stream_upload_from_file(
     store: &dyn ObjectStore,
-    file: async_fs::File,
+    mut file: async_fs::File,
+    size: u64,
     local_path: &Path,
     object_path: &ObjectPath,
 ) -> Result<()> {
+    // `object_store` takes a part size in bytes and buffers parts in memory.
+    // A 32-bit platform cannot buffer a part larger than 4 GiB, so we check.
+    let part_size = usize::try_from(multipart_part_size(size)).with_context(|| {
+        format!(
+            "multipart parts for a {} byte file do not fit in memory on this platform",
+            size
+        )
+    })?;
+
     let upload = store.put_multipart(object_path).await.with_context(|| {
         format!("error starting multipart upload: {}", object_path)
     })?;
 
-    let mut write = WriteMultipart::new(upload);
+    let mut write = WriteMultipart::new_with_chunk_size(upload, part_size);
+    let mut buf = vec![0u8; part_size];
 
-    let mut reader = tokio::io::BufReader::with_capacity(8 * 1024 * 1024, file);
-    let mut buf = vec![0u8; 8 * 1024 * 1024];
-
+    // Read one part at a time, so each write hands `WriteMultipart` exactly
+    // one part and it never has to hold a partial one.
     loop {
-        let n = reader.read(&mut buf).await.with_context(|| {
+        let filled = read_part(&mut file, &mut buf).await.with_context(|| {
             format!("error reading file: {}", local_path.display())
         })?;
 
-        if n == 0 {
+        if filled == 0 {
             break;
         }
 
-        write.write(&buf[..n]);
+        write.write(&buf[..filled]);
     }
 
     write.finish().await.with_context(|| {
@@ -150,6 +201,24 @@ pub(crate) async fn stream_upload_from_file(
     })?;
 
     Ok(())
+}
+
+/// Read into `buf` until it is full or the file ends, and report how many
+/// bytes it holds. A count below `buf.len()` only happens at end of file, so
+/// the caller can treat that read as the tail. Errors carry no context: the
+/// caller knows which file this is.
+async fn read_part(file: &mut async_fs::File, buf: &mut [u8]) -> Result<usize> {
+    let mut filled = 0;
+
+    while filled < buf.len() {
+        let read = file.read(&mut buf[filled..]).await?;
+        if read == 0 {
+            break;
+        }
+        filled += read;
+    }
+
+    Ok(filled)
 }
 
 /// Implementation of [`CloudStorage::sync_down`](crate::storage::CloudStorage::sync_down);
@@ -372,6 +441,7 @@ mod test {
 
     use assert_fs::{TempDir, prelude::*};
     use predicates::prelude::*;
+    use proptest::prelude::*;
 
     use object_store::memory::InMemory;
 
@@ -606,6 +676,84 @@ mod test {
         );
 
         Ok(())
+    }
+
+    /// `multipart_part_size` must always return a part size that is legal and
+    /// also big enough to fit the object.
+    ///
+    /// The properties are the shape of the bug: a part below the 5 MiB service
+    /// minimum, a part above the 5 GiB service maximum, or a part count above
+    /// the 10,000-part limit. Each one makes an upload impossible.
+    ///
+    /// We do not pin the part size itself. `DEFAULT_PART_SIZE` is a constant we
+    /// chose, and a test that can only fail when someone edits a constant tells
+    /// us nothing. Any legal policy passes here.
+    ///
+    /// The two ranges need separate handling. Above `MAX_PARTS * MAX_PART_SIZE`
+    /// no legal answer exists, so the part-count property cannot hold there.
+    /// That range is also the only place the 5 GiB ceiling can bind, so testing
+    /// only below it would leave that property unable to fail. We draw from
+    /// both sides, and guard the part count.
+    #[test]
+    fn test_multipart_part_size() {
+        // The largest object we can upload at all.
+        const MAX_OBJECT_SIZE: u64 = MAX_PARTS * MAX_PART_SIZE;
+        // Smallest part S3 and GCS accept. We deliberately pick a larger
+        // policy floor, so the test states the service limit, not our choice.
+        const MIN_PART_SIZE: u64 = 5 * MIB;
+
+        // Boundaries are where mistakes live, so we test them directly rather
+        // than hope a random draw lands on one.
+        let edges = [
+            0,
+            1,
+            MIN_PART_SIZE,
+            MIN_PART_SIZE + 1,
+            DEFAULT_PART_SIZE,
+            DEFAULT_PART_SIZE + 1,
+            MAX_PART_SIZE,
+            MAX_PART_SIZE + 1,
+            MAX_OBJECT_SIZE - 1,
+            MAX_OBJECT_SIZE,
+            MAX_OBJECT_SIZE + 1,
+            u64::MAX,
+        ];
+        let sizes = prop_oneof![
+            proptest::sample::select(edges.to_vec()),
+            // Below the ceiling, where the parts have to cover the object.
+            0..=MAX_OBJECT_SIZE,
+            // Above it, where only the service limits still apply.
+            MAX_OBJECT_SIZE + 1..=u64::MAX,
+        ];
+
+        proptest!(|(size in sizes)| {
+            let part_size = multipart_part_size(size);
+            prop_assert!(
+                part_size >= MIN_PART_SIZE,
+                "{size}: part size {part_size} is below the service minimum {MIN_PART_SIZE}",
+            );
+            prop_assert!(
+                part_size <= MAX_PART_SIZE,
+                "{size}: part size {part_size} is above the service maximum {MAX_PART_SIZE}",
+            );
+            // A part count that fits is only possible up to the ceiling.
+            if size <= MAX_OBJECT_SIZE {
+                let parts = size.div_ceil(part_size);
+                prop_assert!(
+                    parts <= MAX_PARTS,
+                    "{size}: needs {parts} parts of {part_size} bytes, over the limit of {MAX_PARTS}",
+                );
+            }
+        });
+    }
+
+    /// Above the largest object we can build, there is no legal part size. We
+    /// answer with the service ceiling and let the service reject the upload,
+    /// rather than inventing a part size or refusing locally.
+    #[test]
+    fn test_multipart_part_size_above_the_ceiling() {
+        let size = MAX_PARTS * MAX_PART_SIZE + 1;
+        assert_eq!(multipart_part_size(size), MAX_PART_SIZE);
     }
 
     /// Make sure we use the right kind of request for our file size.
