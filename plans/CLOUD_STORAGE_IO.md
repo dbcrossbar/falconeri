@@ -78,8 +78,19 @@ Also: **MinIO (local dev) is not representative of any number in this section**,
 | **CS-1** | `s3.rs`, `gs.rs` (no `ClientOptions` set) | any object taking >30 s to transfer fails, then restarts from zero | default `timeout = 30s` applied to the reqwest client, documented as "until the response body has finished" |
 | **CS-2** | `stream_upload_from_file` (`mod.rs:361`) | worker pods **OOMKilled** on multi-GB outputs | `WriteMultipart::write` starts parts "regardless of how many outstanding uploads are already in progress"; we never call `wait_for_capacity`, so disk speed outruns the network and the file accumulates in RAM |
 | **CS-3** | `mod.rs:374` (`WriteMultipart::new`) | uploads > ~48.8 GiB fail at `CompleteMultipartUpload` | default 5 MiB chunks × the 10,000 part limit |
-| **CS-4** | `mod.rs:361` (always `put_multipart`) | **any 0-byte output file fails the datum** | a 0-byte file fills no chunk buffer, so `finish()` calls `complete()` with **zero parts**, which S3 and GCS reject. Invisible in tests: our `MemoryStorage` delegates to `InMemory`, whose `complete()` happily stores an empty object |
+| **CS-4** | `mod.rs:361` (always `put_multipart`) | every empty or small output costs a 3-request multipart handshake and an incomplete upload that bills for parts if we fail midway | a 0-byte file fills no chunk buffer, so `finish()` calls `complete()` with **zero parts**, which the raw S3 and GCS APIs reject. See the CS-4 note below: `object_store` papers over that, so uploads succeed today |
 | **CS-5** | `sync_up_dir` (`mod.rs:889`) | **silent data loss**: outputs never uploaded, datum reported `Done` | `WalkDir::into_iter().filter_map(\|e\| e.ok())` discards permission/IO/`read_dir` errors, and `upload_outputs` marks every recorded `OutputFile` `Done` from the overall result |
+
+**CS-4 note (found while implementing).** `object_store` 0.14.2 never sends a
+zero-part completion to either backend: the AWS client uploads one empty part
+first (`aws/client.rs`, `complete_multipart`), and the GCS client aborts the
+upload and falls back to a plain `put` (`gcp/client.rs`, `multipart_complete`).
+So "0-byte output fails the datum" does not happen on S3 or GCS today, and the
+release-blocker framing was wrong. What CS-4 still costs is requests and risk:
+three requests per small file, against the per-prefix rates of §1.2, and an
+incomplete multipart upload for every empty or small output — the orphaned-parts
+case CS-6 worries about. The single-`put` path removes both, and makes us
+independent of a workaround we do not control.
 
 Approach (deliberately loose — details worked out in the working session):
 
@@ -171,8 +182,8 @@ The pre-beta series. One thing per patch: refactor patches change no behavior an
 3. [x] Round-trip tests: local tree → `sync_up_dir` → `sync_down` → byte-identical, over nasty names; plus the ~2,000–5,000 object variant asserting exact set equality. Lands **before** any transfer-code changes.
 4. [x] CS-5: stop swallowing `WalkDir` errors in `sync_up_dir`; include the offending path. Tests: symlink loop (errors even as root) and `chmod 000` (skipped when `uid == 0`). Needs no new machinery, so it goes in ahead of the rest.
 5. [x] Test machinery: `ObjectStoreFaultInjector` under the `testing` feature — wraps `InMemory`, fails the Nth call of a kind, records which methods were called. Handed straight to the `sync.rs` functions; no `CloudStorage` adapter needed. Deliberately minimal: a canned fault error rather than arbitrary variants, and only the call kinds the beta tests need.
-6. [ ] CS-4: `put` for empty and small objects, multipart above the threshold. Test: which branch ran, using the injector's call log — plus the in-memory empty-file round trip, commented as documenting intent rather than proving the fix.
-7. [ ] MinIO: `FALCONERI_MINIO_TEST=1` plus a `just` target — empty file, ~30 MiB multipart, and a deep weird-named tree round trip. This is what actually proves CS-4; land it with that patch if convenient.
+6. [x] CS-4: `put` for empty and small objects, multipart above the threshold. Test: which branch ran, using the injector's call log — plus the in-memory empty-file round trip, commented as documenting intent rather than proving the fix.
+7. [ ] MinIO: `FALCONERI_MINIO_TEST=1` plus a `just` target — empty file, ~30 MiB multipart, and a deep weird-named tree round trip. This is what actually proves CS-4; land it with that patch if convenient. **Caveat from CS-4:** object_store works around zero-part completions on S3 and GCS (see the §2.1 note), so this test now checks that the request shape we choose is legal and round-trips on a real server, not that a previously failing case now passes.
 8. [ ] CS-3: pure chunk-size function `clamp(ceil(size / 10_000), 5 MiB, 5 GiB)`, table-tested at tiny / 1 GiB / 48.8 GiB / 5 TiB / over, wired into the upload path; align the read buffer to the chunk size.
 9. [ ] CS-2: bound in-flight parts with `wait_for_capacity(N)`, `N × chunk_size` inside the pod's memory budget. Untested on purpose (§2.4).
 10. [ ] CS-1: set `ClientOptions` at one shared construction site for S3 and GCS — `timeout` disabled plus a `read_timeout` for stall detection, and a deliberate `RetryConfig` review. Untested on purpose (§2.4); the guard is that it exists in exactly one place.
