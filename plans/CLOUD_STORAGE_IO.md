@@ -54,9 +54,9 @@ Design consequence: any concurrency budget must be computed **cluster-aggregate 
 | EBS | **baseline 650 Mbps ≈ 81 MiB/s**, 3,600 IOPS | 630 Mbps ≈ 79 MiB/s |
 | gp3 volume | 125 MiB/s baseline (so instance-bound anyway) | same |
 
-Our own CPU cost is ~1 core to sustain ~1 Gbps (TLS ~0.3–0.5 core/Gbps, checksum ~0.2–0.4, chunk copy + `write_all` ~0.3–0.5), so 2 CPUs is comfortably enough to hit the platform wall.
+Our own CPU cost is ~1 core to sustain ~1 Gbps (TLS ~0.3–0.5 core/Gbps, checksum ~0.2–0.4, chunk copy + `write_all` ~0.3–0.5), so 2 CPUs is comfortably enough to reach the platform baseline speeds.
 
-**Working assumption: ~100 MiB/s sustained per 2-CPU pod**, single stream, and it is usually the *scratch disk* rather than S3 that binds.
+**Working assumption for typical sizing: ~100 MiB/s sustained per 2-CPU pod**, single stream. On a default gp3 volume it is usually the *scratch disk* rather than S3 that binds; the worked example below assumes SSD-or-better scratch, provisioned to keep up with uploads.
 
 | object size | single stream at ~100 MiB/s | verdict |
 |---|---|---|
@@ -64,6 +64,8 @@ Our own CPU cost is ~1 core to sustain ~1 Gbps (TLS ~0.3–0.5 core/Gbps, checks
 | 3–10 GiB | ~30–90 s | fine perf-wise; this is where CS-1 (30 s timeout) starts killing transfers (~3.7 GiB at 100 MiB/s) |
 | 60 GiB | ~8–15 min | only here does parallel chunking pay, and only if scratch storage also improves |
 | whole job | scales linearly with pod count (100 pods ≈ 600 GiB/min) | never the bottleneck |
+
+**An envelope, not a wall.** The ~100 MiB/s figure is a baseline estimate for a 2-vCPU pod on a typical instance under normal load, not a hard limit. A pod on an idle or larger instance can draw much more, and our code should let it. Worked example: a 60 GiB upload with `N = 2` in-flight 16 MiB parts, idle instance, burst credits full, fast scratch. Request count never limits it: one in-region TLS stream carries multiple Gbps by itself. CPU binds first, at about 2 Gbps for 2 vCPU (~1 core/Gbps), and two streams reach that. The upload therefore adapts up to ~2.5x baseline with `N = 2`. Filling the 12.5 Gbps burst would need ~4–8 cores of network CPU, so an idle pod leaves burst bandwidth unused at *any* `N`; extra streams would only add contention. The one shape where stream count limits throughput is a high-RTT or lossy link (a cross-region endpoint): per-stream TCP throughput falls with RTT and loss, and concurrency is the only cure. Our buckets are same-region today; revisit `N` if that changes.
 
 Caveat: network I/O credits and EBS bandwidth are **node-level**. A 2-CPU pod sharing an 8-vCPU node with 3 siblings downloading at once gets roughly a quarter of each budget.
 
@@ -187,11 +189,14 @@ The pre-beta series. One thing per patch: refactor patches change no behavior an
 6. [x] CS-4: `put` for empty and small objects, multipart above the threshold. Test: which branch ran, using the injector's call log — plus the in-memory empty-file round trip, commented as documenting intent rather than proving the fix.
 7. [ ] MinIO: `FALCONERI_MINIO_TEST=1` plus a `just` target — empty file, ~30 MiB multipart, and a deep weird-named tree round trip. This is what actually proves CS-4; land it with that patch if convenient. **Caveat from CS-4:** object_store works around zero-part completions on S3 and GCS (see the §2.1 note), so this test now checks that the request shape we choose is legal and round-trips on a real server, not that a previously failing case now passes.
 8. [x] CS-3: pure part-size function `clamp(ceil(size / 10_000), FLOOR, 5 GiB)` with **FLOOR = 16 MiB**, a policy choice above the 5 MiB service minimum (rationale in §1.2), property-tested as above and wired into the upload path. The read buffer is one part. Single-`put` uploads use the same threshold: a file that size can only ever produce one part. The function is total and backend-agnostic, so we do not reject an oversized file early: the real ceiling differs by backend (5 TiB on GCS, about 48.8 TiB on S3), and the function has no backend to ask. A clear early error would need a backend-aware layer, and is not scheduled.
-9. [ ] CS-2: bound in-flight parts with `wait_for_capacity(N)`, `N × chunk_size` inside the pod's memory budget. Untested on purpose (§2.4). **Two findings from CS-3.** The streaming read buffer is now exactly one part, so peak memory is about `(1 + N) × part_size`. And `part_size` grows with the file, up to the 5 GiB service maximum, so a fixed `N` is not a memory budget: we must either pick `N` from the computed part size or cap the part size below the service maximum, which lowers the largest object we can write.
+9. [x] CS-2: bound in-flight parts with `wait_for_capacity(N)`, `N × chunk_size` inside the pod's memory budget. Untested on purpose (§2.4). **Two findings from CS-3.** The streaming read buffer is now exactly one part, so peak memory is about `(1 + N) × part_size`. And `part_size` grows with the file, up to the 5 GiB service maximum, so a fixed `N` is not a memory budget: we must either pick `N` from the computed part size or cap the part size below the service maximum, which lowers the largest object we can write.
+   - **Decision: fixed `N = 2`** (`UPLOAD_PART_CONCURRENCY`), no adaptivity. Neither S3 nor GCS throttles bandwidth per request or per connection today, so concurrency beyond latency-hiding buys little. Even on an idle, burst-fed instance, CPU caps a 2-CPU pod near 2 Gbps, and two in-region streams reach that (worked example in §1.4). One in-flight part already pipelines disk reads over uploads; two survive a slow or retried request.
+   - We accept that memory then scales with part size: 48 MiB for outputs up to 160 GiB, but ~1.6 GiB at the 5 TiB GCS maximum. Users of very large outputs allocate more container memory; needs a docs bullet (item 12).
 10. [ ] CS-1: set `ClientOptions` at one shared construction site for S3 and GCS — `timeout` disabled plus a `read_timeout` for stall detection, and a deliberate `RetryConfig` review. Untested on purpose (§2.4); the guard is that it exists in exactly one place.
 11. [ ] CS-6: best-effort `abort()` on upload error paths, logged; injector test asserting `abort` is reached. Normally §2.2 triage, but it rides along cheaply once the injector exists and real users are pushing data. Caveat: `WriteMultipart::finish()` already calls `abort()` itself when a part or `complete()` fails, so the injector test pins that upstream safety net rather than our own error handling. The part of CS-6 a store test cannot see—dropping the upload without calling `finish()` when the read loop errors—stays a code-review item.
 12. [ ] Polish & docs:
     - Ops: lifecycle rule aborting incomplete multipart uploads on our buckets (S3 and the GCS equivalent), documented where bucket setup is documented.
+    - Document worker memory sizing for large outputs: peak upload buffering is `3 × multipart_part_size(output size)` — 48 MiB up to 160 GiB, ~1.6 GiB at the 5 TiB GCS maximum.
     - Two comment edits recording decisions: reword `mem.rs`'s "limitations" note (marker objects are not part of our model — existence is derived), and add the *hard error when noticed, never hunt* comment beside `check_for_bucket_entry_collisions`.
 
 ---
@@ -220,8 +225,8 @@ Nothing built in (§1.3). If we ever need it: `head` for size → split into ran
 
 **Why the numbers argue against it** (§1.4):
 
-- A 2-CPU pod is capped near **100 MiB/s** by network baseline (~98 MiB/s) and EBS baseline (~81 MiB/s) — and usually by scratch disk, not by S3.
-- One stream already reaches that wall using about **one core**. Adding streams adds CPU contention inside the pod and against sibling pods without raising the wall.
+- A typical 2-CPU pod sees an envelope near **100 MiB/s**: network baseline ~98 MiB/s, EBS baseline ~81 MiB/s — and on default gp3, scratch disk binds before S3. Idle or larger instances go higher, but CPU still caps a 2-CPU pod near 2 Gbps (§1.4 worked example).
+- One stream already reaches that envelope using about **one core**. Adding streams adds CPU contention inside the pod and against sibling pods without raising the underlying baselines.
 - So parallel ranges only pay off when a *single* object's transfer time is minutes — call it **≥10 GiB** — and even then the gain (maybe 2–4×) requires also moving scratch to instance-store or provisioned-throughput EBS, otherwise it is still disk-bound.
 
 **Two decisions it would force, if we revisit them:** chunk size becomes a durable format decision (AWS recommends reading objects back aligned to the part sizes used on upload), and it must satisfy the part-number budget `≥ ceil(size / 10,000)`. Pick once, apply to both directions. We have now picked on the upload side: `multipart_part_size` gives 16 MiB up to 160 GiB, then `ceil(size / 10_000)` up to the 5 GiB ceiling. The part size is therefore a function of object size, not a constant, and an aligned reader must recompute the same function.

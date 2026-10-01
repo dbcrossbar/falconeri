@@ -153,6 +153,19 @@ pub(crate) async fn upload_file(
         .with_context(|| format!("error putting object: {}", object_path.as_ref()))
 }
 
+/// How many part uploads may run at the same time in one multipart upload.
+///
+/// Each part uploads in its own request, on its own connection. One part in
+/// flight already overlaps disk reads with network transfers. Two keeps data
+/// moving when one request slows down or retries, which would otherwise
+/// stall the whole upload. Two is also enough to use whatever bandwidth a
+/// pod really gets: an idle instance may offer much more than the typical
+/// ~100 MiB/s, but then pod CPU limits the transfer, not request count, and
+/// one in-region stream already carries multiple Gbps. Peak memory is
+/// `(1 + UPLOAD_PART_CONCURRENCY) * part_size`, because we also hold one
+/// part buffer while we read the next part from disk.
+const UPLOAD_PART_CONCURRENCY: usize = 2;
+
 /// Stream an upload from an open local file, as a multipart upload.
 ///
 /// `size` is the file size reported by the caller. We stream the data in
@@ -192,6 +205,16 @@ pub(crate) async fn stream_upload_from_file(
         if filled == 0 {
             break;
         }
+
+        // `wait_for_capacity(N)` returns once fewer than N part requests are
+        // in flight, so at most N run at once. It also reports a part
+        // request that already failed.
+        write
+            .wait_for_capacity(UPLOAD_PART_CONCURRENCY)
+            .await
+            .with_context(|| {
+                format!("error uploading multipart part to: {}", object_path)
+            })?;
 
         write.write(&buf[..filled]);
     }
