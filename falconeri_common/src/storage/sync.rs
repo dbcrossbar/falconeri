@@ -196,7 +196,16 @@ pub(crate) async fn sync_up_dir(
     // Our prefix arrives as URI text, which is already percent-encoded.
     let base = object_path_from_uri_path(key)?;
 
-    for entry in WalkDir::new(local_path).into_iter().filter_map(|e| e.ok()) {
+    // Walk errors must not be swallowed: upstream `upload_outputs` marks
+    // every recorded output `Done` based on this call's overall result,
+    // so skipping an unreadable or vanished directory silently loses
+    // data (CS-5). `walkdir::Error`'s Display names the path it failed
+    // on; our context names the tree we were walking.
+    for entry in WalkDir::new(local_path) {
+        let entry = entry.with_context(|| {
+            format!("error walking local directory {}", local_path.display())
+        })?;
+
         if !entry.file_type().is_file() {
             continue;
         }
@@ -713,6 +722,92 @@ mod test {
             collect_tree(&src.path().join("tree"))?,
             down_tree,
             "empty files and dotfile-backed directories should round trip",
+        );
+
+        Ok(())
+    }
+
+    /// A walk failure must abort `sync_up_dir` rather than be skipped.
+    /// Upstream, `upload_outputs` marks every recorded output `Done`
+    /// based on this call's overall result, so a swallowed walk error
+    /// means outputs silently never land (CS-5).
+    ///
+    /// A self-referential symlink as the walk root fails with ELOOP on
+    /// every lookup—even for root, which ignores mode bits—so this test
+    /// always exercises the error path. (A symlink loop _inside_ the
+    /// tree would not: `WalkDir` does not follow symlinks by default and
+    /// simply yields them as non-file entries.)
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_sync_up_dir_propagates_walk_errors() -> Result<()> {
+        let dir = TempDir::new()?;
+        // The link `<dir>/loop` points at "loop", i.e. at itself.
+        std::os::unix::fs::symlink("loop", dir.path().join("loop"))?;
+
+        let storage = MemoryStorage::new("bucket");
+        let err = storage
+            .sync_up_dir(
+                Path::new(&format!("{}/loop/", dir.display())),
+                &storage.uri("up/"),
+            )
+            .await
+            .expect_err(
+                "a walk error in the source tree must fail the upload, not be skipped",
+            );
+        assert!(
+            format!("{err:#}").contains("loop"),
+            "the error should name the offending path, got {err:#}",
+        );
+
+        Ok(())
+    }
+
+    /// An unreadable subdirectory must also fail the upload (CS-5), and
+    /// name the directory that broke. Unlike the symlink-loop test,
+    /// this one is skipped when the process can read mode-000
+    /// directories—root or CAP_DAC_OVERRIDE, i.e. most containers—which
+    /// is exactly why the loop test above is the always-on one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_sync_up_dir_propagates_unreadable_dir() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new()?;
+        dir.child("src/ok.txt").write_str("ok")?;
+        dir.child("src/locked/hidden.txt").write_str("h")?;
+
+        let locked = dir.path().join("src/locked");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))?;
+
+        // Probe whether we can defeat the mode bits, rather than
+        // checking the euid (no unsafe libc calls, and it tracks the
+        // actual capability set).
+        let readable_despite_mode = std::fs::read_dir(&locked).is_ok();
+
+        let storage = MemoryStorage::new("bucket");
+        let result = storage
+            .sync_up_dir(&dir.path().join("src/"), &storage.uri("up/"))
+            .await;
+
+        // Restore permissions before anything that can fail, so the
+        // TempDir can always clean up.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))?;
+
+        if readable_despite_mode {
+            eprintln!(
+                "skipping: this process can read mode-000 directories \
+                 (running as root or with DAC override)",
+            );
+            return Ok(());
+        }
+
+        let err = result.expect_err(
+            "an unreadable subdirectory must fail the upload, not be \
+             silently skipped (CS-5)",
+        );
+        assert!(
+            format!("{err:#}").contains("locked"),
+            "the error should name the offending path, got {err:#}",
         );
 
         Ok(())
