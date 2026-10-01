@@ -77,7 +77,7 @@ use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt, stream};
 use lazy_static::lazy_static;
 use object_store::{
-    ObjectMeta, ObjectStore, ObjectStoreExt, path::Path as ObjectPath,
+    ClientConfigKey, ObjectMeta, ObjectStore, ObjectStoreExt, path::Path as ObjectPath,
 };
 use regex::Regex;
 
@@ -793,6 +793,47 @@ fn parse_cloud_storage_uri(url: &str) -> Result<(&str, &str, &str)> {
     let path = caps.name("path").map(|m| m.as_str()).unwrap_or("");
     assert!(!path.starts_with("/"));
     Ok((scheme, bucket, path))
+}
+
+/// The HTTP client policy shared by every remote storage backend (CS-1).
+///
+/// `object_store` defaults the overall request timeout to 30 seconds, and
+/// that timeout covers the whole response body. It therefore kills any
+/// transfer slower than 30 seconds. We replace it with two layers:
+///
+/// - `read_timeout` of 60 seconds detects stalled downloads. The timer
+///   resets after each successful read. Even a 1 MiB/s trickle delivers
+///   bytes about every 15 seconds, so 60 seconds of silence is a dead
+///   connection, not a slow one.
+/// - A 24-hour per-request timeout backstops requests that stall forever.
+///   This mainly matters for uploads, which `read_timeout` does not cover.
+///   The value must exceed every legal single request: one 5 GiB part
+///   uploads in under 45 minutes at 2 MiB/s, and a 1 TiB streamed download
+///   takes about 12 hours at 25 MiB/s.
+///
+/// We reviewed the other defaults and kept them. `connect_timeout` stays 5
+/// seconds. `RetryConfig` stays at 10 retries within 180 seconds, with 100 ms
+/// to 15 s exponential backoff. That 180-second window is short enough so that
+/// the original signed request remains valid, which is required. And its side
+/// effect is what we want: brief failures retry in place, while an attempt that
+/// fails after 3 minutes surfaces the error and lets datum-level retry restart
+/// it.
+///
+/// This trait exists because each backend has its own config-key enum, and Rust
+/// cannot name "types with a `with_config` method". The impls route through
+/// `with_config`, which updates one config field at a time. So this policy
+/// overrides only the two timeout keys, and every other value that `from_env()`
+/// collected survives. Duration strings parse at `build()` time, so a bad value
+/// fails the store constructor at startup, never mid-transfer.
+pub(crate) trait StorageClientPolicy: Sized {
+    /// Set one HTTP client config field on this builder.
+    fn client_option(self, key: ClientConfigKey, value: &'static str) -> Self;
+
+    /// Apply the Falconeri HTTP timeout policy to this builder.
+    fn with_storage_timeouts(self) -> Self {
+        self.client_option(ClientConfigKey::Timeout, "24 hours")
+            .client_option(ClientConfigKey::ReadTimeout, "60 seconds")
+    }
 }
 
 #[cfg(test)]

@@ -3,9 +3,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use object_store::{ObjectStore, gcp::GoogleCloudStorageBuilder};
+use object_store::{
+    ClientConfigKey, ObjectStore,
+    gcp::{GoogleCloudStorageBuilder, GoogleConfigKey},
+};
 
-use super::CloudStorage;
+use super::{CloudStorage, StorageClientPolicy};
 use crate::{
     kubernetes::{base64_encoded_optional_secret_string, kubectl_secret},
     prelude::*,
@@ -55,8 +58,9 @@ impl GoogleCloudStorage {
     ) -> Result<Self> {
         let (_, bucket, _) = parse_cloud_storage_uri(bucket_uri)?;
 
-        let mut builder =
-            GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket);
+        let mut builder = GoogleCloudStorageBuilder::from_env()
+            .with_bucket_name(bucket)
+            .with_storage_timeouts();
 
         // First try secret_data from Kubernetes (used by falconerid).
         if let Some(ref secret) = secret_data {
@@ -77,6 +81,12 @@ impl GoogleCloudStorage {
             store: Arc::new(store),
             bucket: bucket.to_owned(),
         })
+    }
+}
+
+impl StorageClientPolicy for GoogleCloudStorageBuilder {
+    fn client_option(self, key: ClientConfigKey, value: &'static str) -> Self {
+        self.with_config(GoogleConfigKey::Client(key), value)
     }
 }
 
