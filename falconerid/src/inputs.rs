@@ -87,6 +87,7 @@ impl Listings {
     }
 
     /// Internal fetch helper.
+    #[allow(clippy::double_must_use)]
     #[async_recursion]
     async fn fetch_helper(
         &mut self,
