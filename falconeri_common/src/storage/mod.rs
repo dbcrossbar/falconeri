@@ -77,12 +77,9 @@ use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt, stream};
 use lazy_static::lazy_static;
 use object_store::{
-    ObjectMeta, ObjectStore, ObjectStoreExt,
-    path::{Path as ObjectPath, PathPart},
+    ClientConfigKey, ObjectMeta, ObjectStore, ObjectStoreExt, path::Path as ObjectPath,
 };
 use regex::Regex;
-use tokio::{fs as async_fs, io::AsyncWriteExt};
-use walkdir::WalkDir;
 
 use crate::{prelude::*, secret::Secret};
 
@@ -94,7 +91,29 @@ pub mod gs;
 /// enabled.
 #[cfg(any(test, feature = "testing"))]
 pub mod mem;
+
+/// Testing: bare-bones fault-injecting `ObjectStore`, for exercising
+/// error paths that `InMemory` can never produce.
+#[cfg(any(test, feature = "testing"))]
+pub mod injector;
 pub mod s3;
+
+/// Streaming file transfers between buckets and the local filesystem.
+///
+/// This backs [`CloudStorage::sync_down`] and
+/// [`CloudStorage::sync_up_dir`], and adds [`sync::sync_down_all`], a
+/// batch download entry point for callers (like the worker) which hold a
+/// [`CloudStorageForUri`] resolver rather than a single bucket.
+mod sync;
+
+// `sync` is an implementation detail; batch downloads are reached through
+// the [`CloudStorageForUri::sync_down_all`] default method, but callers
+// still need to name the targets.
+pub use sync::SyncTarget;
+
+/// Testing: helpers shared by the storage unit tests.
+#[cfg(test)]
+mod test_util;
 
 /// Does this path look like a "prefix" as opposed to a bucket object?
 fn path_looks_like_prefix(path: &str) -> bool {
@@ -318,85 +337,6 @@ impl BucketListing {
     }
 }
 
-/// Stream a download from the object store to a local file.
-///
-/// This streams the data in chunks to avoid loading entire files (which may
-/// be 60GB+) into memory.
-pub(crate) async fn stream_download_to_file(
-    store: &dyn ObjectStore,
-    object_path: &ObjectPath,
-    local_path: &Path,
-) -> Result<()> {
-    let get_result = store
-        .get(object_path)
-        .await
-        .with_context(|| format!("error fetching object: {}", object_path))?;
-
-    let mut stream = get_result.into_stream();
-    let mut file = async_fs::File::create(local_path).await.with_context(|| {
-        format!("cannot create local file: {}", local_path.display())
-    })?;
-
-    while let Some(chunk) = stream
-        .try_next()
-        .await
-        .with_context(|| format!("error streaming object: {}", object_path))?
-    {
-        file.write_all(&chunk).await.with_context(|| {
-            format!("error writing to file: {}", local_path.display())
-        })?;
-    }
-
-    file.flush()
-        .await
-        .with_context(|| format!("error flushing file: {}", local_path.display()))?;
-
-    Ok(())
-}
-
-/// Stream an upload from a local file to the object store.
-///
-/// This uses multipart upload to stream the data in chunks to avoid loading
-/// entire files (which may be 60GB+) into memory.
-pub(crate) async fn stream_upload_from_file(
-    store: &dyn ObjectStore,
-    local_path: &Path,
-    object_path: &ObjectPath,
-) -> Result<()> {
-    let file = async_fs::File::open(local_path).await.with_context(|| {
-        format!("cannot open local file: {}", local_path.display())
-    })?;
-
-    let upload = store.put_multipart(object_path).await.with_context(|| {
-        format!("error starting multipart upload: {}", object_path)
-    })?;
-
-    let mut write = object_store::WriteMultipart::new(upload);
-
-    let mut reader = tokio::io::BufReader::with_capacity(8 * 1024 * 1024, file);
-    let mut buf = vec![0u8; 8 * 1024 * 1024];
-
-    loop {
-        let n = tokio::io::AsyncReadExt::read(&mut reader, &mut buf)
-            .await
-            .with_context(|| {
-                format!("error reading file: {}", local_path.display())
-            })?;
-
-        if n == 0 {
-            break;
-        }
-
-        write.write(&buf[..n]);
-    }
-
-    write.finish().await.with_context(|| {
-        format!("error completing multipart upload: {}", object_path)
-    })?;
-
-    Ok(())
-}
-
 /// Check for bucket collisions of various sorts.
 pub fn check_for_bucket_entry_collisions(entries: &[BucketEntry]) -> Result<()> {
     // Create a table of all our entries.
@@ -461,6 +401,17 @@ pub trait CloudStorageForUri: Send + Sync {
     /// and the storage driver can check to see if there are any secrets it can
     /// use to authenticate.
     async fn for_uri(&mut self, bucket_uri: &str) -> Result<Arc<dyn CloudStorage>>;
+
+    /// Download a batch of targets, resolving each bucket through
+    /// [`Self::for_uri`].
+    ///
+    /// Validation and resolution order (everything validated and resolved
+    /// before anything is written, one backend per distinct bucket, every
+    /// failure naming its target) are specified by
+    /// [`sync::sync_down_all`], which this delegates to.
+    async fn sync_down_all(&mut self, targets: &[SyncTarget]) -> Result<()> {
+        sync::sync_down_all(self, targets).await
+    }
 }
 
 /// Given a URL, return a real, network-backed [`CloudStorage`] implementation
@@ -798,64 +749,7 @@ pub trait CloudStorage: Send + Sync {
     /// `100%25.txt` is stored locally as `100%.txt`.
     #[instrument(skip_all, fields(uri = %uri, local_path = %local_path.display()), level = "trace")]
     async fn sync_down(&self, uri: &str, local_path: &Path) -> Result<()> {
-        trace!("downloading {} to {}", uri, local_path.display());
-
-        let (_, _, key) = parse_cloud_storage_uri(uri)?;
-        check_sync_down_kinds(uri, path_looks_like_prefix(key), local_path)?;
-
-        if path_looks_like_prefix(key) {
-            // We have a directory. If our source URI ends in `/`, so should our
-            // `local_path`, since we generate these ourselves.
-            async_fs::create_dir_all(local_path)
-                .await
-                .context("cannot create local download directory")?;
-
-            let prefix = object_path_from_uri_path(key)?;
-            let mut stream = self.store().list(Some(&prefix));
-
-            // TODO: This has _massively_ insufficient parallelism for many use cases.
-            // We need to do something with buffer_unordered and specified concurrency.
-            while let Some(meta) = stream
-                .try_next()
-                .await
-                .context("error listing bucket objects")?
-            {
-                // Both sides of this comparison are encoded key text, so we
-                // strip first and decode afterwards.
-                let object_key = meta.location.to_string();
-                let relative_key = object_key
-                    .strip_prefix(key)
-                    .unwrap_or(&object_key)
-                    .trim_start_matches('/');
-
-                if relative_key.is_empty() {
-                    continue;
-                }
-
-                let file_path = local_path.join(local_relative_path(relative_key)?);
-
-                if let Some(parent) = file_path.parent() {
-                    async_fs::create_dir_all(parent)
-                        .await
-                        .context("cannot create local subdirectory")?;
-                }
-
-                stream_download_to_file(self.store(), &meta.location, &file_path)
-                    .await?;
-            }
-        } else {
-            // We have a file.
-            if let Some(parent) = local_path.parent() {
-                async_fs::create_dir_all(parent)
-                    .await
-                    .context("cannot create local download directory")?;
-            }
-
-            let object_path = object_path_from_uri_path(key)?;
-            stream_download_to_file(self.store(), &object_path, local_path).await?;
-        }
-
-        Ok(())
+        sync::sync_down(self.store(), uri, local_path).await
     }
 
     /// Synchronize the local directory `local_path` up to the bucket prefix
@@ -872,65 +766,9 @@ pub trait CloudStorage: Send + Sync {
     /// object keys, so `100%.txt` is stored under the key `100%25.txt`.
     #[instrument(skip_all, fields(local_path = %local_path.display(), uri = %uri), level = "trace")]
     async fn sync_up_dir(&self, local_path: &Path, uri: &str) -> Result<()> {
-        trace!("uploading {} to {}", local_path.display(), uri);
-
-        let (_, _, key) = parse_cloud_storage_uri(uri)?;
-        if !local_path_is_dir(local_path) || !path_looks_like_prefix(key) {
-            return Err(format_err!(
-                "sync_up_dir copies a local directory (trailing '/') to a bucket \
-                 prefix (trailing '/'), but got local path {} and URI {uri}",
-                local_path.display(),
-            ));
-        }
-
-        // Our prefix arrives as URI text, which is already percent-encoded.
-        let base = object_path_from_uri_path(key)?;
-
-        for entry in WalkDir::new(local_path).into_iter().filter_map(|e| e.ok()) {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-
-            let file_path = entry.path();
-            let relative_path = file_path
-                .strip_prefix(local_path)
-                .context("failed to compute relative path")?;
-
-            // Build our key one segment at a time. Each local name is literal
-            // text, which `PathPart::from` encodes for us; concatenating our
-            // encoded prefix with literal names and encoding the whole thing
-            // would encode the prefix twice.
-            let mut object_path = base.clone();
-            for component in relative_path.components() {
-                // `strip_prefix` should leave us with plain names, and nothing
-                // else is safe to encode into a key.
-                let std::path::Component::Normal(name) = component else {
-                    return Err(format_err!(
-                        "unexpected path component {component:?} in local file {}",
-                        file_path.display(),
-                    ));
-                };
-                let name = name.to_str().with_context(|| {
-                    format!("local path {} is not valid UTF-8", file_path.display())
-                })?;
-                object_path = object_path.join(PathPart::from(name));
-            }
-
-            stream_upload_from_file(self.store(), file_path, &object_path)
-                .await
-                .with_context(|| {
-                    format!(
-                        "error uploading to cloud bucket: {}",
-                        object_path.as_ref()
-                    )
-                })?;
-        }
-
-        Ok(())
+        sync::sync_up_dir(self.store(), local_path, uri).await
     }
 }
-
-impl dyn CloudStorage {}
 
 /// Parse a cloud storage URL into (bucket, key).
 fn parse_cloud_storage_uri(url: &str) -> Result<(&str, &str, &str)> {
@@ -957,11 +795,54 @@ fn parse_cloud_storage_uri(url: &str) -> Result<(&str, &str, &str)> {
     Ok((scheme, bucket, path))
 }
 
+/// The HTTP client policy shared by every remote storage backend (CS-1).
+///
+/// `object_store` defaults the overall request timeout to 30 seconds, and
+/// that timeout covers the whole response body. It therefore kills any
+/// transfer slower than 30 seconds. We replace it with two layers:
+///
+/// - `read_timeout` of 60 seconds detects stalled downloads. The timer
+///   resets after each successful read. Even a 1 MiB/s trickle delivers
+///   bytes about every 15 seconds, so 60 seconds of silence is a dead
+///   connection, not a slow one.
+/// - A 24-hour per-request timeout backstops requests that stall forever.
+///   This mainly matters for uploads, which `read_timeout` does not cover.
+///   The value must exceed every legal single request: one 5 GiB part
+///   uploads in under 45 minutes at 2 MiB/s, and a 1 TiB streamed download
+///   takes about 12 hours at 25 MiB/s.
+///
+/// We reviewed the other defaults and kept them. `connect_timeout` stays 5
+/// seconds. `RetryConfig` stays at 10 retries within 180 seconds, with 100 ms
+/// to 15 s exponential backoff. That 180-second window is short enough so that
+/// the original signed request remains valid, which is required. And its side
+/// effect is what we want: brief failures retry in place, while an attempt that
+/// fails after 3 minutes surfaces the error and lets datum-level retry restart
+/// it.
+///
+/// This trait exists because each backend has its own config-key enum, and Rust
+/// cannot name "types with a `with_config` method". The impls route through
+/// `with_config`, which updates one config field at a time. So this policy
+/// overrides only the two timeout keys, and every other value that `from_env()`
+/// collected survives. Duration strings parse at `build()` time, so a bad value
+/// fails the store constructor at startup, never mid-transfer.
+pub(crate) trait StorageClientPolicy: Sized {
+    /// Set one HTTP client config field on this builder.
+    fn client_option(self, key: ClientConfigKey, value: &'static str) -> Self;
+
+    /// Apply the Falconeri HTTP timeout policy to this builder.
+    fn with_storage_timeouts(self) -> Self {
+        self.client_option(ClientConfigKey::Timeout, "24 hours")
+            .client_option(ClientConfigKey::ReadTimeout, "60 seconds")
+    }
+}
+
 #[cfg(test)]
 mod test {
     use assert_fs::{TempDir, prelude::*};
-    use predicates::prelude::*;
 
+    use super::test_util::{
+        file_contents, fixture, object, prefix, prefix_entries, sorted,
+    };
     use super::{mem::MemoryStorage, *};
 
     #[test]
@@ -1059,78 +940,6 @@ mod test {
             )),
         ];
         assert!(check_for_bucket_entry_collisions(&entries).is_ok());
-    }
-
-    /// A predicate asserting that a file contains exactly `expected`.
-    fn file_contents(expected: &str) -> impl predicates::Predicate<Path> {
-        predicate::str::diff(expected.to_owned())
-            .from_utf8()
-            .from_file_path()
-    }
-
-    /// Our standard fixture. Every object is exactly one byte long, so
-    /// listings can assert exact [`BucketObject`]s without computing sizes.
-    ///
-    /// ```text
-    /// top.txt
-    /// a0.txt
-    /// a/e.txt
-    /// a/b/c.txt
-    /// a/b/d.txt
-    /// ab/c         (traps any "a" matched as a raw string prefix)
-    /// d1/sub/f.txt
-    /// d2/sub/g.txt
-    /// d3/other.txt (a top-level directory with no "sub")
-    /// d4/sub       (a _file_ named "sub" under a top-level directory)
-    /// ```
-    async fn fixture() -> Result<MemoryStorage> {
-        MemoryStorage::with_objects(
-            "bucket",
-            [
-                ("top.txt", "t"),
-                ("a0.txt", "0"),
-                ("a/e.txt", "e"),
-                ("a/b/c.txt", "c"),
-                ("a/b/d.txt", "d"),
-                ("ab/c", "x"),
-                ("d1/sub/f.txt", "f"),
-                ("d2/sub/g.txt", "g"),
-                ("d3/other.txt", "o"),
-                ("d4/sub", "s"),
-            ],
-        )
-        .await
-    }
-
-    /// An expected object entry. All fixture objects are one byte long.
-    fn object(uri: &str) -> BucketEntry {
-        BucketEntry::Object(BucketObject::from_uri_for_test(uri, 1))
-    }
-
-    /// An expected prefix entry.
-    fn prefix(uri: &str) -> BucketEntry {
-        BucketEntry::Prefix(BucketPrefix::from_uri(uri.to_owned()).unwrap())
-    }
-
-    /// Our listings make no promises about order, which comes from the
-    /// underlying object store, so we compare entry lists up to permutation.
-    fn sorted(mut entries: Vec<BucketEntry>) -> Vec<BucketEntry> {
-        entries.sort();
-        entries
-    }
-
-    /// List `uri` and require a `BucketListing::PrefixEntries`, which is what
-    /// a trailing slash always guarantees.
-    async fn prefix_entries(
-        storage: &MemoryStorage,
-        uri: &str,
-    ) -> Result<Vec<BucketEntry>> {
-        match storage.list_nonrecursive(uri).await? {
-            BucketListing::PrefixEntries(entries) => Ok(entries),
-            BucketListing::Object(object) => {
-                panic!("expected a listing for {uri}, got object {}", object.uri)
-            }
-        }
     }
 
     /// Listing the bucket root yields top-level objects and prefixes, and
@@ -1333,138 +1142,6 @@ mod test {
             .list_subpath_entries(&storage.bucket_uri(), "sub")
             .await?;
         assert_eq!(sorted(entries), sorted(expected));
-
-        Ok(())
-    }
-
-    /// Syncing down a single file writes the file and creates parent
-    /// directories as needed.
-    #[tokio::test]
-    async fn test_sync_down_file() -> Result<()> {
-        let storage = fixture().await?;
-        let dir = TempDir::new()?;
-
-        storage
-            .sync_down(
-                &storage.uri("a/e.txt"),
-                &dir.path().join("deep/nested/e.txt"),
-            )
-            .await?;
-
-        dir.child("deep/nested/e.txt").assert(file_contents("e"));
-
-        Ok(())
-    }
-
-    /// Syncing down a prefix recreates the tree with paths relative to that
-    /// prefix, and does not pick up the `ab/c` sibling.
-    #[tokio::test]
-    async fn test_sync_down_prefix() -> Result<()> {
-        let storage = fixture().await?;
-        let dir = TempDir::new()?;
-
-        storage
-            .sync_down(&storage.uri("a/"), &dir.path().join("out/"))
-            .await?;
-
-        dir.child("out/e.txt").assert(file_contents("e"));
-        dir.child("out/b/c.txt").assert(file_contents("c"));
-        dir.child("out/b/d.txt").assert(file_contents("d"));
-        dir.child("out/a0.txt").assert(predicate::path::missing());
-        dir.child("out/c.txt").assert(predicate::path::missing());
-
-        Ok(())
-    }
-
-    /// Syncing down the bucket root, which is how whole-repo inputs are
-    /// downloaded, preserves the full key hierarchy.
-    #[tokio::test]
-    async fn test_sync_down_bucket_root() -> Result<()> {
-        let storage = fixture().await?;
-        let dir = TempDir::new()?;
-
-        storage
-            .sync_down(&storage.bucket_uri(), &dir.path().join("repo/"))
-            .await?;
-
-        dir.child("repo/top.txt").assert(file_contents("t"));
-        dir.child("repo/a/b/c.txt").assert(file_contents("c"));
-        dir.child("repo/ab/c").assert(file_contents("x"));
-        dir.child("repo/d4/sub").assert(file_contents("s"));
-
-        Ok(())
-    }
-
-    /// Syncing up a directory uploads each file under the target prefix,
-    /// creating deeper keys for subdirectories and no marker objects.
-    #[tokio::test]
-    async fn test_sync_up_dir() -> Result<()> {
-        let storage = MemoryStorage::new("bucket");
-        let dir = TempDir::new()?;
-        dir.child("src/x.txt").write_str("x")?;
-        dir.child("src/nested/y.txt").write_str("y")?;
-
-        storage
-            .sync_up_dir(&dir.path().join("src/"), &storage.uri("up/"))
-            .await?;
-
-        assert_eq!(storage.contents("up/x.txt").await?, b"x");
-        assert_eq!(storage.contents("up/nested/y.txt").await?, b"y");
-        assert_eq!(
-            sorted(prefix_entries(&storage, &storage.uri("up/")).await?),
-            sorted(vec![
-                object(&storage.uri("up/x.txt")),
-                prefix(&storage.uri("up/nested/")),
-            ]),
-        );
-
-        Ok(())
-    }
-
-    /// Syncing requires both ends to agree about kind, because guessing has
-    /// historically meant silently writing a file over a prefix.
-    #[tokio::test]
-    async fn test_sync_kinds_must_agree() -> Result<()> {
-        let storage = fixture().await?;
-        let dir = TempDir::new()?;
-
-        // `sync_down` of a directory needs a local directory...
-        assert!(
-            storage
-                .sync_down(&storage.uri("a/"), &dir.path().join("no-slash"))
-                .await
-                .is_err(),
-            "a prefix URI needs a trailing '/' on the local path"
-        );
-        // ...and an object needs a local file.
-        assert!(
-            storage
-                .sync_down(&storage.uri("a/e.txt"), &dir.path().join("with-slash/"))
-                .await
-                .is_err(),
-            "an object URI must not get a local directory"
-        );
-
-        // `sync_up_dir` copies directories only, in both directions.
-        dir.child("f.txt").write_str("f")?;
-        assert!(
-            storage
-                .sync_up_dir(&dir.path().join("f.txt"), &storage.uri("a/"))
-                .await
-                .is_err(),
-            "uploading a file over the prefix 'a/' must be refused"
-        );
-        assert!(
-            storage.contents("a").await.is_err(),
-            "nothing should have been stored at 'a'"
-        );
-        assert!(
-            storage
-                .sync_up_dir(&dir.path().join("src/"), &storage.uri("results"))
-                .await
-                .is_err(),
-            "an object URI is not a prefix to upload into"
-        );
 
         Ok(())
     }

@@ -5,7 +5,7 @@ use std::{env, fs, io::ErrorKind, process::Stdio, sync::Arc, time::Duration};
 use falconeri_common::{
     prelude::*,
     rest_api::{Client, OutputFilePatch, OutputFilePost},
-    storage::{self, CloudStorageForUri as _, CloudStorageResolver},
+    storage::{self, CloudStorageForUri, CloudStorageResolver, SyncTarget},
     tracing_support::initialize_tracing,
 };
 use tokio::{
@@ -43,6 +43,11 @@ async fn main() -> Result<()> {
     // Create a REST client.
     let client = Client::new(ConnectVia::Cluster).await?;
 
+    // Build one storage resolver for the life of this pod, instead of one
+    // per file or per datum. We don't pass in any `secrets`, because those
+    // are supposed to be specified in our Kubernetes job when it's created.
+    let mut resolver = CloudStorageResolver::new(vec![]);
+
     // Loop until the job is done.
     loop {
         // Fetch our job, and make sure that it's still running.
@@ -62,6 +67,7 @@ async fn main() -> Result<()> {
                 &datum,
                 &files,
                 &job.command,
+                &mut resolver,
                 output.clone(),
             )
             .await;
@@ -117,21 +123,24 @@ async fn process_datum(
     datum: &Datum,
     files: &[InputFile],
     cmd: &[String],
+    resolver: &mut dyn CloudStorageForUri,
     to_record: Arc<RwLock<Vec<u8>>>,
 ) -> Result<()> {
     debug!("processing datum {}", datum.id);
 
     // Download each file.
     reset_work_dirs()?;
-    for file in files {
-        // We don't pass in any `secrets` here, because those are supposed to
-        // be specified in our Kubernetes job when it's created.
-        let mut resolver = CloudStorageResolver::new(vec![]);
-        let storage = resolver.for_uri(&file.uri).await?;
-        storage
-            .sync_down(&file.uri, Path::new(&file.local_path))
-            .await?;
-    }
+    let targets: Vec<SyncTarget> = files
+        .iter()
+        .map(|file| SyncTarget {
+            uri: file.uri.clone(),
+            local_path: PathBuf::from(&file.local_path),
+        })
+        .collect();
+    resolver
+        .sync_down_all(&targets)
+        .await
+        .context("could not download inputs")?;
 
     // Run our command.
     if cmd.is_empty() {
@@ -160,7 +169,7 @@ async fn process_datum(
     }
 
     // Finish up after the command completes.
-    upload_outputs(client, job, datum)
+    upload_outputs(client, job, datum, resolver)
         .await
         .context("could not upload outputs")?;
     reset_work_dirs()?;
@@ -285,7 +294,12 @@ fn reset_work_dir(work_dir: &Path) -> Result<()> {
 
 /// Upload `/pfs/out` to our output bucket.
 #[instrument(skip_all, fields(job = %job.id, datum = %datum.id), level = "debug")]
-async fn upload_outputs(client: &Client, job: &Job, datum: &Datum) -> Result<()> {
+async fn upload_outputs(
+    client: &Client,
+    job: &Job,
+    datum: &Datum,
+    resolver: &mut dyn CloudStorageForUri,
+) -> Result<()> {
     // Collect output file info for the files we're going to upload.
     let mut new_output_files = vec![];
     let local_paths = glob::glob("/pfs/out/**/*").context("error listing /pfs/out")?;
@@ -325,7 +339,6 @@ async fn upload_outputs(client: &Client, job: &Job, datum: &Datum) -> Result<()>
     // Upload all our files in a batch, for maximum performance. `/pfs/out` is a
     // directory, so our egress URI must have a trailing slash to keep
     // `sync_up_dir` happy.
-    let mut resolver = CloudStorageResolver::new(vec![]);
     let storage = resolver.for_uri(&job.egress_uri).await?;
     let result = storage
         .sync_up_dir(
